@@ -2,6 +2,7 @@
 //! desktop, Dropbox, OneDrive, iCloud Drive) keeps in step between machines.
 //! See docs/LIBRARY_SYNC.md for the layout, versions and merge rules.
 pub mod clock;
+pub mod files;
 pub mod tables;
 
 #[cfg(test)]
