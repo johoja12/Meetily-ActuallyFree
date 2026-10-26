@@ -455,6 +455,38 @@ async fn apply_records(
     Ok(deferred)
 }
 
+/// Publishes this device's voices when they differ from the published copy.
+pub fn export_voices(library: &Library, device: &str) -> Result<bool> {
+    let voices = crate::diarization::voice_profiles::export_voices()?;
+    let path = library.voices_file(device);
+    let bytes = serde_json::to_vec(&voices)?;
+    if std::fs::read(&path).ok().as_deref() == Some(bytes.as_slice()) {
+        return Ok(false);
+    }
+    write_json_atomic(&path, &voices)?;
+    Ok(true)
+}
+
+/// Merges other devices' voices into this device's. Returns whether any
+/// voice here changed.
+pub async fn import_voices(pool: &SqlitePool, library: &Library, device: &str) -> Result<bool> {
+    let mut conn = pool.acquire().await?;
+    let people = redirect_map(&mut conn, "person").await?;
+    let mut changed = false;
+    for other in library.other_devices(device) {
+        let path = library.voices_file(&other);
+        let Some(print) = fingerprint(&path) else { continue };
+        let seen = format!("seen:{other}/voices.json");
+        if get_state(&mut conn, &seen).await?.as_deref() == Some(print.as_str()) {
+            continue;
+        }
+        let Some(file) = read_json::<crate::diarization::voice_profiles::VoicesFile>(&path) else { continue };
+        changed |= crate::diarization::voice_profiles::import_voices(&file, &people)?;
+        set_state(&mut conn, &seen, &print).await?;
+    }
+    Ok(changed)
+}
+
 /// Follows redirects to the id that is kept. Chains end within a few hops;
 /// the bound guards against a cycle in damaged data.
 pub fn resolve<'a>(redirects: &'a HashMap<String, String>, id: &'a str) -> &'a str {

@@ -44,6 +44,10 @@ pub struct VoiceSource {
     /// Sum of the meeting's turn embeddings.
     pub sum: Vec<f32>,
     pub turns: u32,
+    /// Sync version (`sync::config::stamp`) of this share; empty for shares
+    /// saved before library sync.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub version: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -74,6 +78,7 @@ impl VoiceProfile {
             meeting_id: String::new(),
             sum: self.embedding.iter().map(|value| value * self.samples as f32).collect(),
             turns: self.samples,
+            version: String::new(),
         }]
     }
 }
@@ -92,7 +97,7 @@ fn share_of(meeting_id: &str, vectors: &[Vec<f32>]) -> VoiceSource {
     for vector in vectors {
         for (target, value) in sum.iter_mut().zip(vector) { *target += *value; }
     }
-    VoiceSource { meeting_id: meeting_id.to_string(), sum, turns: vectors.len() as u32 }
+    VoiceSource { meeting_id: meeting_id.to_string(), sum, turns: vectors.len() as u32, version: String::new() }
 }
 
 /// Adds shares to a voice's earlier ones. A meeting learned again replaces
@@ -483,6 +488,11 @@ pub(crate) fn drop_meeting_share(person_id: &str, meeting_id: &str) -> bool {
     }) {
         log::warn!("Could not remove a meeting from a voice: {error}");
     }
+    if changed {
+        record_tombstone(|tombstones| {
+            tombstones.removed.insert(format!("{person_id}|{meeting_id}"), crate::sync::config::stamp());
+        });
+    }
     changed
 }
 
@@ -580,6 +590,8 @@ fn store_shares(person_id: &str, name: &str, shares: Vec<VoiceSource>, replace: 
         Some(index) if !replace => profiles[index].shares(),
         _ => Vec::new(),
     };
+    let stamp = crate::sync::config::stamp();
+    let shares = shares.into_iter().map(|share| VoiceSource { version: stamp.clone(), ..share }).collect();
     let profile = build_profile(person_id.to_string(), name.to_string(), merge_shares(earlier, shares))
         .map_err(|error| Meeting(error.to_string()))?;
     if existing.is_none() && profiles.len() >= MAX_PROFILES {
@@ -680,7 +692,140 @@ pub async fn list_voice_profiles(state: tauri::State<'_, crate::state::AppState>
 
 #[tauri::command]
 pub fn delete_voice_profile(person_id: String) -> Result<(), String> {
-    edit_profiles(|profiles| forget(profiles, &person_id)).map_err(|error| error.to_string())
+    edit_profiles(|profiles| forget(profiles, &person_id)).map_err(|error| error.to_string())?;
+    record_forgotten(&person_id);
+    Ok(())
+}
+
+fn record_forgotten(person_id: &str) {
+    record_tombstone(|tombstones| {
+        tombstones.forgotten.insert(person_id.to_string(), crate::sync::config::stamp());
+    });
+}
+
+/// Voices and shares deleted on this device, so library sync does not bring
+/// them back from another device's older copy. Kept next to the voices.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct VoiceTombstones {
+    /// person id -> version of the forget.
+    #[serde(default)]
+    pub forgotten: std::collections::BTreeMap<String, String>,
+    /// "person|meeting" -> version of the share's removal.
+    #[serde(default)]
+    pub removed: std::collections::BTreeMap<String, String>,
+}
+
+/// What this device publishes as `voices.json`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct VoicesFile {
+    pub profiles: Vec<VoiceProfile>,
+    #[serde(default)]
+    pub tombstones: VoiceTombstones,
+}
+
+fn tombstones_path() -> PathBuf {
+    crate::paths::install_data_root().join("voice_profiles_sync.json")
+}
+
+fn load_tombstones() -> VoiceTombstones {
+    std::fs::read(tombstones_path()).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+}
+
+fn record_tombstone(change: impl FnOnce(&mut VoiceTombstones)) {
+    let Ok(_guard) = PROFILE_WRITE.lock() else { return };
+    let mut tombstones = load_tombstones();
+    change(&mut tombstones);
+    if let Err(error) = crate::sync::files::write_json_atomic(&tombstones_path(), &tombstones) {
+        log::warn!("Could not record a forgotten voice for sync: {error}");
+    }
+}
+
+pub(crate) fn export_voices() -> Result<VoicesFile> {
+    let _guard = PROFILE_WRITE.lock().map_err(|_| anyhow::anyhow!("Voice profile lock poisoned"))?;
+    Ok(VoicesFile { profiles: load()?, tombstones: load_tombstones() })
+}
+
+/// Merges another device's voices; returns whether this device's changed.
+pub(crate) fn import_voices(remote: &VoicesFile, people: &HashMap<String, String>) -> Result<bool> {
+    let _guard = PROFILE_WRITE.lock().map_err(|_| anyhow::anyhow!("Voice profile lock poisoned"))?;
+    let mut profiles = load()?;
+    let mut tombstones = load_tombstones();
+    let before_tombstones = tombstones.clone();
+    let changed = merge_remote(&mut profiles, &mut tombstones, remote, people);
+    if changed {
+        save(&profiles)?;
+    }
+    if tombstones != before_tombstones {
+        crate::sync::files::write_json_atomic(&tombstones_path(), &tombstones)?;
+    }
+    Ok(changed)
+}
+
+/// Newest share per (person, meeting) wins; a forget or a share removal
+/// newer than a share drops it; each voice is rebuilt from what remains.
+/// `people` maps redirected contact ids to the ids that are kept.
+fn merge_remote(
+    profiles: &mut Vec<VoiceProfile>,
+    tombstones: &mut VoiceTombstones,
+    remote: &VoicesFile,
+    people: &HashMap<String, String>,
+) -> bool {
+    let kept = |id: &str| crate::sync::engine::resolve(people, id).to_string();
+    let newer = |slot: Option<&String>, version: &str| slot.map_or(true, |known| known.as_str() < version);
+    for (person, version) in &remote.tombstones.forgotten {
+        let person = kept(person);
+        if newer(tombstones.forgotten.get(&person), version) {
+            tombstones.forgotten.insert(person, version.clone());
+        }
+    }
+    for (pair, version) in &remote.tombstones.removed {
+        let Some((person, meeting)) = pair.split_once('|') else { continue };
+        let pair = format!("{}|{meeting}", kept(person));
+        if newer(tombstones.removed.get(&pair), version) {
+            tombstones.removed.insert(pair, version.clone());
+        }
+    }
+
+    let mut voices: Vec<(String, String, Vec<VoiceSource>)> = profiles
+        .iter()
+        .map(|profile| (profile.person_id.clone(), profile.name.clone(), profile.shares()))
+        .collect();
+    for profile in &remote.profiles {
+        let person = kept(&profile.person_id);
+        let index = match voices.iter().position(|(id, _, _)| *id == person) {
+            Some(index) => index,
+            None => {
+                voices.push((person.clone(), profile.name.clone(), Vec::new()));
+                voices.len() - 1
+            }
+        };
+        let shares = &mut voices[index].2;
+        // Shares saved before sync have no meeting or version to merge by.
+        for share in profile.sources.iter().filter(|share| !share.meeting_id.is_empty() && !share.version.is_empty()) {
+            match shares.iter_mut().find(|local| local.meeting_id == share.meeting_id) {
+                Some(local) if local.version.as_str() < share.version.as_str() => *local = share.clone(),
+                Some(_) => {}
+                None => shares.push(share.clone()),
+            }
+        }
+    }
+
+    let mut rebuilt = Vec::new();
+    for (person, name, mut shares) in voices {
+        let forgotten = tombstones.forgotten.get(&person);
+        shares.retain(|share| {
+            forgotten.map_or(true, |forgot| share.version.as_str() > forgot.as_str())
+                && tombstones.removed.get(&format!("{person}|{}", share.meeting_id))
+                    .map_or(true, |removed| share.version.as_str() > removed.as_str())
+        });
+        shares.sort_by(|a, b| a.version.cmp(&b.version));
+        if let Ok(profile) = build_profile(person, name, merge_shares(Vec::new(), shares)) {
+            rebuilt.push(profile);
+        }
+    }
+    let same = serde_json::to_value(&rebuilt).ok() == serde_json::to_value(&*profiles).ok();
+    *profiles = rebuilt;
+    !same
 }
 
 /// Loads the saved voices, applies a change, and saves them if it changed any.
@@ -761,6 +906,7 @@ pub fn contact_deleted(person_id: &str) {
     if let Err(error) = edit_profiles(|profiles| forget(profiles, person_id)) {
         log::warn!("Could not forget a deleted contact's voice: {error}");
     }
+    record_forgotten(person_id);
 }
 
 #[cfg(test)]
@@ -785,7 +931,7 @@ mod tests {
     fn share(meeting_id: &str, axis: usize, turns: u32) -> VoiceSource {
         let mut sum = vec![0.0; 128];
         sum[axis] = turns as f32;
-        VoiceSource { meeting_id: meeting_id.into(), sum, turns }
+        VoiceSource { meeting_id: meeting_id.into(), sum, turns, version: String::new() }
     }
 
     #[test]
@@ -873,6 +1019,65 @@ mod tests {
         assert_eq!(picked.len(), 20);
         assert_eq!((picked[0], picked[19]), (0, 95));
         assert_eq!(spread(&turns[..5], 20).len(), 5);
+    }
+
+    fn stamped(meeting_id: &str, axis: usize, turns: u32, version: &str) -> VoiceSource {
+        VoiceSource { version: version.into(), ..share(meeting_id, axis, turns) }
+    }
+
+    fn remote(profiles: Vec<VoiceProfile>, tombstones: VoiceTombstones) -> VoicesFile {
+        VoicesFile { profiles, tombstones }
+    }
+
+    #[test]
+    fn newest_share_per_meeting_wins() {
+        let local = build_profile("p1".into(), "Alice".into(), vec![stamped("m1", 0, 2, "0002-a")]).unwrap();
+        let theirs = build_profile("p1".into(), "Alice".into(), vec![stamped("m1", 1, 3, "0003-b"), stamped("m2", 0, 2, "0001-b")]).unwrap();
+        let mut profiles = vec![local.clone()];
+        let mut tombstones = VoiceTombstones::default();
+        assert!(merge_remote(&mut profiles, &mut tombstones, &remote(vec![theirs.clone()], VoiceTombstones::default()), &HashMap::new()));
+        let shares = profiles[0].shares();
+        assert_eq!(shares.len(), 2);
+        assert_eq!(shares.iter().find(|share| share.meeting_id == "m1").unwrap().version, "0003-b");
+        // Merging the same file again changes nothing.
+        assert!(!merge_remote(&mut profiles, &mut tombstones, &remote(vec![theirs], VoiceTombstones::default()), &HashMap::new()));
+
+        // An older remote share does not replace a newer local one.
+        let mut profiles = vec![build_profile("p1".into(), "Alice".into(), vec![stamped("m1", 0, 2, "0009-a")]).unwrap()];
+        let older = build_profile("p1".into(), "Alice".into(), vec![stamped("m1", 1, 2, "0003-b")]).unwrap();
+        merge_remote(&mut profiles, &mut VoiceTombstones::default(), &remote(vec![older], VoiceTombstones::default()), &HashMap::new());
+        assert_eq!(profiles[0].shares()[0].version, "0009-a");
+    }
+
+    #[test]
+    fn forget_and_removal_drop_older_shares_only() {
+        let mut profiles = vec![build_profile("p1".into(), "Alice".into(), vec![stamped("m1", 0, 2, "0003-a")]).unwrap()];
+        let forgot = VoiceTombstones { forgotten: [("p1".to_string(), "0005-b".to_string())].into(), ..Default::default() };
+        assert!(merge_remote(&mut profiles, &mut VoiceTombstones::default(), &remote(Vec::new(), forgot.clone()), &HashMap::new()));
+        assert!(profiles.is_empty());
+
+        // Learned again after the forget: kept.
+        let mut profiles = vec![build_profile("p1".into(), "Alice".into(), vec![stamped("m1", 0, 2, "0006-a")]).unwrap()];
+        let mut tombstones = VoiceTombstones::default();
+        merge_remote(&mut profiles, &mut tombstones, &remote(Vec::new(), forgot), &HashMap::new());
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(tombstones.forgotten["p1"], "0005-b");
+
+        // An untagged meeting's share is removed; the rest of the voice stays.
+        let mut profiles = vec![build_profile("p1".into(), "Alice".into(), vec![stamped("m1", 0, 2, "0003-a"), stamped("m2", 0, 2, "0003-a")]).unwrap()];
+        let removed = VoiceTombstones { removed: [("p1|m1".to_string(), "0004-b".to_string())].into(), ..Default::default() };
+        merge_remote(&mut profiles, &mut VoiceTombstones::default(), &remote(Vec::new(), removed), &HashMap::new());
+        assert_eq!(profiles[0].shares().iter().map(|share| share.meeting_id.as_str()).collect::<Vec<_>>(), vec!["m2"]);
+    }
+
+    #[test]
+    fn imported_voices_follow_contact_redirects() {
+        let theirs = build_profile("p-dup".into(), "Al".into(), vec![stamped("m1", 0, 2, "0003-b")]).unwrap();
+        let mut profiles = Vec::new();
+        let people = HashMap::from([("p-dup".to_string(), "p-kept".to_string())]);
+        merge_remote(&mut profiles, &mut VoiceTombstones::default(), &remote(vec![theirs], VoiceTombstones::default()), &people);
+        assert_eq!(profiles[0].person_id, "p-kept");
+        assert_eq!(profiles[0].samples, 2);
     }
 
     #[test]
