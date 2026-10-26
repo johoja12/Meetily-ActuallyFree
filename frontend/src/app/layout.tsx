@@ -25,6 +25,7 @@ import { ConfigProvider, useConfig } from '@/contexts/ConfigContext'
 import { OnboardingProvider } from '@/contexts/OnboardingContext'
 import { OptionalModelDownloadsProvider } from '@/contexts/OptionalModelDownloadsContext'
 import { DownloadProgressToastProvider } from '@/components/shared/DownloadProgressToast'
+import { VoiceMatchNotifier } from '@/components/VoiceMatchNotifier'
 import { UpdateCheckProvider } from '@/components/UpdateCheckProvider'
 import { RecordingPostProcessingProvider } from '@/contexts/RecordingPostProcessingProvider'
 import { ImportDialogProvider } from '@/contexts/ImportDialogContext'
@@ -530,6 +531,7 @@ export default function RootLayout({
                                 {onboardingCompleted && !showOnboarding && <RouteWarmup />}
                                 {/* Download progress toast provider - listens for background downloads */}
                                 <DownloadProgressToastProvider />
+                                <VoiceMatchNotifier />
 
                                 {/* Show onboarding or main app */}
                                 {showOnboarding ? (

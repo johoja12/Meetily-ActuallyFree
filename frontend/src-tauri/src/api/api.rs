@@ -1275,6 +1275,7 @@ pub async fn api_save_transcript<R: Runtime>(
                 "Successfully saved transcript and created meeting with id: {}",
                 meeting_id
             );
+            crate::diarization::voice_learning::meeting_saved(pool, &meeting_id).await;
             Ok(serde_json::json!({
                 "status": "success",
                 "message": "Transcript saved successfully",

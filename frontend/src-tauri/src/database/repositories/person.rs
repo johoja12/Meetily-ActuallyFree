@@ -783,6 +783,17 @@ impl PeopleRepository {
             .bind(source_id)
             .execute(&mut *tx)
             .await?;
+        // Automatic names stay automatic, and undone ones stay undone, for
+        // the kept contact. A pair the kept contact already has wins.
+        sqlx::query("UPDATE OR IGNORE voice_speaker_matches SET person_id = ? WHERE person_id = ?")
+            .bind(target_id)
+            .bind(source_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM voice_speaker_matches WHERE person_id = ?")
+            .bind(source_id)
+            .execute(&mut *tx)
+            .await?;
 
         let merged_notes = match (target.1.filter(|n| !n.trim().is_empty()), source.0.filter(|n| !n.trim().is_empty())) {
             (Some(kept), Some(extra)) => Some(format!("{}\n\n{}", kept, extra)),
@@ -2116,6 +2127,9 @@ mod tests {
              CREATE TABLE transcripts (id TEXT PRIMARY KEY, meeting_id TEXT NOT NULL, speaker TEXT); \
              CREATE TABLE action_items (id TEXT PRIMARY KEY, meeting_id TEXT NOT NULL, text TEXT NOT NULL, \
                  owner_label TEXT, person_id TEXT, updated_at TEXT NOT NULL DEFAULT 'now'); \
+             CREATE TABLE voice_speaker_matches (meeting_id TEXT NOT NULL, original_label TEXT NOT NULL, \
+                 person_id TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, \
+                 PRIMARY KEY (meeting_id, original_label, person_id)); \
              INSERT INTO meetings (id) VALUES ('m1'), ('m2'); \
              INSERT INTO people (id, display_name, normalized_name, notes) VALUES \
                  ('p-tom', 'Tom', 'tom', 'Met at kickoff'), ('p-thomas', 'Thomas Becker', 'thomas becker', NULL); \
@@ -2184,8 +2198,25 @@ mod tests {
     #[tokio::test]
     async fn merging_moves_meetings_items_and_notes_to_the_kept_contact() {
         let pool = contacts_pool().await;
+        sqlx::raw_sql(
+            "INSERT INTO voice_speaker_matches VALUES ('m1', 'Speaker 2', 'p-tom', 'applied', 'now'), \
+                 ('m2', 'Speaker 3', 'p-tom', 'rejected', 'now'), ('m2', 'Speaker 3', 'p-thomas', 'applied', 'now');",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
         let kept = PeopleRepository::merge_people(&pool, "p-tom", "p-thomas").await.unwrap();
         assert_eq!(kept.id, "p-thomas");
+        let matches: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT meeting_id, person_id, status FROM voice_speaker_matches ORDER BY meeting_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(matches, vec![
+            ("m1".to_string(), "p-thomas".to_string(), "applied".to_string()),
+            ("m2".to_string(), "p-thomas".to_string(), "applied".to_string()),
+        ]);
         assert_eq!(kept.meeting_count, 2);
         assert_eq!(speaker_of(&pool, "t1").await, "Thomas Becker");
         let item_owner: (String, String) =

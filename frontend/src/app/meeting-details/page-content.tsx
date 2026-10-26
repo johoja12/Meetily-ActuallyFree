@@ -37,6 +37,7 @@ import { announceChange, getMeetingGroup, setMeetingGroup } from '@/lib/workspac
 import { deleteMeetings, renameMeeting } from '@/lib/meeting-actions';
 import { displayTitle } from '@/lib/meeting-titles';
 import { cn } from '@/lib/utils';
+import { VOICE_MATCHES_CHANGED_EVENT } from '@/lib/voice-matches';
 import { displaySpeaker, speakerColorIndexMap, speakerKey } from '@/utils/speakerUtils';
 
 // Page remounts join the same backend-start attempt. Only accepted attempts are
@@ -362,6 +363,16 @@ export default function PageContent({
     },
     [onRefetchTranscripts, meetingData.aiSummary],
   );
+
+  // Saved voices can name this meeting's speakers from the background worker.
+  useEffect(() => {
+    const onMatches = (event: Event) => {
+      const meetingIds = (event as CustomEvent<{ meetingIds?: string[] }>).detail?.meetingIds ?? [];
+      if (meetingIds.includes(meeting.id)) void onRefetchTranscripts?.();
+    };
+    window.addEventListener(VOICE_MATCHES_CHANGED_EVENT, onMatches);
+    return () => window.removeEventListener(VOICE_MATCHES_CHANGED_EVENT, onMatches);
+  }, [meeting.id, onRefetchTranscripts]);
 
   const mergeSpeakers = async (source: string, target: string) => {
     try {

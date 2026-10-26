@@ -128,6 +128,7 @@ pub fn start<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<()> {
         .map(|v| v.embedding)
         .filter(|e| !e.is_empty());
     let has_enrolled = enrolled.is_some();
+    super::voice_profiles::reset_live_names();
     let profiles = match super::voice_profiles::load_for_matching() {
         Ok(profiles) => profiles,
         Err(error) => {
@@ -304,6 +305,7 @@ pub fn assign_speaker(samples: &[f32], mic_dominant: bool) -> Option<LiveSpeaker
     if !mic_dominant {
         d.names[speaker] = super::voice_profiles::best_match(&d.centroids[speaker], &d.profiles)
             .map(|profile| profile.name.clone());
+        if let Some(name) = &d.names[speaker] { super::voice_profiles::note_live_name(name); }
     }
     let user = d.user_speaker();
     // Mic path is always the local user for dual-path STT; system path never is.
