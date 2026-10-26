@@ -20,7 +20,11 @@ used:
 - Audio and transcript seeking: the meeting player shows the waveform instead
   of a plain track and adds 0.5× and 0.75×. Seeking from a line's timestamp
   and following playback work without Labs.
-- Named voice profiles: a Voice panel on each contact's page learns a voice
+- Named voice profiles: naming a speaker learns that contact's voice in the
+  background, and matching unnamed speakers in other meetings get the name
+  with an Undo notice (see "Automatic learning and matching" below). Settings >
+  Labs shows "Learning voices…" and an "Apply voices to past meetings" button.
+  A Voice panel on each contact's page also learns a voice
   from all their recent meetings (up to twelve), updates it the same way so new
   meetings count, or forgets it; the speaker card on a meeting page adds that
   meeting's audio (Remember voice, or Update voice once one exists). A profile
@@ -98,13 +102,64 @@ speech turns on the transcription worker and caches a verified name for that
 meeting-local channel. Nemotron still owns diarization; its channel number is
 never treated as identity. Post-call diarization with either engine compares
 at least two clean system-track turns per remote channel against the profiles.
-Post-call transcription alone does not run this matching pass. The microphone
+Post-call transcription alone does not run this matching pass (the background
+pass described below does, from transcript spans). The microphone
 still labels `You`. The person link is persisted with the transcript when a
 profile name is used. Profiles are a consent-based convenience, not verified
 identity. Enrollment and matching need clean turns, a separate system track,
 and the WeSpeaker model. Short, overlapping, or uncertain turns stay unnamed.
 Profile changes take effect next call for live matching and the next post-call
 diarization pass for an existing recording.
+
+### Automatic learning and matching
+
+Design: [specs/2026-10-27-auto-learn-voices-design.md](superpowers/specs/2026-10-27-auto-learn-voices-design.md).
+`diarization/voice_learning.rs` owns one native worker (started in app setup)
+for all automatic work, so it completes even if the WebView reloads. Callers
+only enqueue; requests coalesce by meeting/label, person/meeting and meeting.
+
+- Learn: `rename_meeting_speaker` and `reassign_transcript_speaker` enqueue
+  the new label when it is a person name; `api_save_transcript` enqueues the
+  named labels the save linked, except names live matching gave out during
+  that recording (`voice_profiles::take_live_names`). Learning reuses
+  `meeting_share` + `store_shares`; failures are logged only.
+- Forget: when an edit leaves a contact unlinked in a meeting, that meeting's
+  share is removed (`drop_meeting_share`); a voice under two turns is forgotten.
+- Match: after any change to a voice, after "Apply voices to past meetings",
+  after a save and after `diarize_meeting`, meetings are matched from their
+  own transcript spans without re-diarization. Generic single labels
+  (`Speaker N`, including components of combined labels) need two clean 2–15 s
+  turns from `voice_profiles::call_track` (`mic.mp4` in room mode, else
+  `system.mp4`); the mean is scored with `best_match_scored` (same 0.80/0.08
+  rule). Contacts already in the meeting and rejected pairs are skipped, one
+  label per contact (strongest) is kept, and the rename goes through
+  `PeopleRepository::rename_meeting_speaker` under the diarization operation
+  guard. This is how room-microphone meetings get post-call names.
+- `voice_speaker_matches` (migration `20261027000000`) records each automatic
+  name as `applied`. Those meetings never train the contact's voice (auto-learn
+  and Learn voice skip them); Remember voice on such a speaker confirms it and
+  deletes the row. Undo (`undo_voice_matches`) restores the original label, or
+  the next free `Speaker N`, and marks the row `rejected`; a manual rename that
+  removes an automatic name also rejects it. Merge moves rows to the kept
+  contact. `person_speakers` is unchanged because the people-migration
+  checksum repair pins its schema.
+- UI: `VoiceMatchNotifier` (mounted in the root layout) turns
+  `voice-matches-applied` into a toast with Undo and a
+  `meetily-voice-matches-changed` window event; an open meeting page refetches
+  its transcript when its id is included. `voice-profiles-changed` refreshes
+  voice lists.
+
+Tests: `cargo test -p meetily --lib -- voice_learning voice_profiles person::`
+covers label selection, choice rules, coalescing, share removal, clean turns,
+and an in-memory apply → undo → no-reapply round trip and manual rejection;
+`tests/lib/voice-match-summary.test.ts` covers the notice wording. No
+model/audio test was added: real WeSpeaker matching on transcript spans is not
+exercised by an automated test.
+
+Limits: crosstalk-heavy meetings may lack two clean turns per label; voices
+learned from room-microphone audio may score lower against call audio (and the
+reverse); a wrong match at the existing threshold is possible, and Undo is the
+remedy.
 
 Live manual names now create person links when the meeting is saved. For older
 meetings whose transcript has a name but lacks that link, enrollment repairs the

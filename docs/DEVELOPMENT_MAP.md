@@ -391,7 +391,10 @@ Clean/Verbatim switch in the meeting player, voices on each contact's page and
 in the speaker card, and per-app capture (not a Labs feature) in Settings >
 Recording and the record card's system audio panel. Named profiles use
 WeSpeaker embeddings in Pyannote live sessions and as a separate identity
-matcher for Nemotron live and both post-call paths. Nemotron remains the selected
+matcher for Nemotron live and both post-call paths. Naming a speaker also learns their
+voice, and a native worker (`diarization/voice_learning.rs`) names matching
+unnamed speakers in past and new meetings from transcript spans, room-microphone
+meetings included, with Undo. Nemotron remains the selected
 diarizer; its channel numbers never establish persistent identity.
 
 From `frontend/`, run all frontend test files in separate Bun processes. The

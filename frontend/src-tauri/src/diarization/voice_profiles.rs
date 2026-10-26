@@ -138,6 +138,25 @@ fn enabled_path() -> PathBuf {
 static ENABLED: OnceLock<AtomicBool> = OnceLock::new();
 static PROFILE_WRITE: Mutex<()> = Mutex::new(());
 static LIVE_MATCHER: Mutex<Option<LiveMatcher>> = Mutex::new(None);
+/// Names live matching gave out during the current recording. They are
+/// automatic, so saving the meeting must not learn a voice from them.
+static LIVE_NAMES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+pub(crate) fn reset_live_names() {
+    if let Ok(mut names) = LIVE_NAMES.lock() { names.clear(); }
+}
+
+pub(crate) fn note_live_name(name: &str) {
+    if let Ok(mut names) = LIVE_NAMES.lock() {
+        if !names.iter().any(|known| known == name) { names.push(name.to_string()); }
+    }
+}
+
+/// The names live matching gave out since the recording started; called once
+/// when the recording is saved.
+pub(crate) fn take_live_names() -> Vec<String> {
+    LIVE_NAMES.lock().map(|mut names| std::mem::take(&mut *names)).unwrap_or_default()
+}
 
 struct LiveMatcher {
     models: DiarizationModels,
@@ -148,6 +167,7 @@ struct LiveMatcher {
 /// Identity matching supplements Nemotron's meeting-local channels; it does not
 /// run a second diarization engine or infer a name from the channel number.
 pub fn start_live_matcher() -> Result<()> {
+    reset_live_names();
     let mut guard = LIVE_MATCHER.lock().map_err(|_| anyhow::anyhow!("Live profile lock poisoned"))?;
     *guard = None;
     let profiles = load_for_matching()?;
@@ -175,7 +195,9 @@ pub fn name_live_nemotron_turn(label: &str, samples: &[f32]) -> Option<String> {
             }
         }
     }
-    matcher.names.get(label).cloned()
+    let name = matcher.names.get(label).cloned();
+    if let Some(name) = &name { note_live_name(name); }
+    name
 }
 
 /// Compare clean, non-overlapping system-track turns for each diarized remote
@@ -298,6 +320,12 @@ fn similarity(a: &[f32], b: &[f32]) -> Option<f32> {
 }
 
 pub fn best_match<'a>(embedding: &[f32], profiles: &'a [VoiceProfile]) -> Option<&'a VoiceProfile> {
+    best_match_scored(embedding, profiles).map(|(profile, _)| profile)
+}
+
+/// The confident match and its cosine score, so callers can prefer the
+/// stronger of two speakers that match one voice.
+pub(crate) fn best_match_scored<'a>(embedding: &[f32], profiles: &'a [VoiceProfile]) -> Option<(&'a VoiceProfile, f32)> {
     let mut ranked: Vec<(f32, &VoiceProfile)> = profiles
         .iter()
         .filter_map(|profile| {
@@ -307,7 +335,7 @@ pub fn best_match<'a>(embedding: &[f32], profiles: &'a [VoiceProfile]) -> Option
     ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
     let (score, profile) = *ranked.first()?;
     let runner_up = ranked.get(1).map(|entry| entry.0).unwrap_or(-1.0);
-    (score >= MATCH_THRESHOLD && score - runner_up >= MATCH_MARGIN).then_some(profile)
+    (score >= MATCH_THRESHOLD && score - runner_up >= MATCH_MARGIN).then_some((profile, score))
 }
 
 /// Why a voice could not be learned. `Unavailable` holds for every meeting
@@ -340,6 +368,135 @@ fn embed_turns(track: &Path, turns: &[(f64, f64)]) -> Result<Vec<Vec<f32>>> {
         }
     }
     Ok(vectors)
+}
+
+/// The recording that holds the voices a meeting's speaker labels describe:
+/// the room microphone in room mode, otherwise the separate call track.
+pub(crate) fn call_track(folder: &Path) -> PathBuf {
+    folder.join(
+        if crate::audio::recording_saver::is_room_microphone_recording(folder) {
+            "mic.mp4"
+        } else {
+            "system.mp4"
+        },
+    )
+}
+
+/// Every saved line's label and recording-relative span, in seconds.
+pub(crate) type TranscriptTurn = (String, Option<f64>, Option<f64>);
+
+pub(crate) async fn transcript_turns(pool: &SqlitePool, meeting_id: &str) -> Result<Vec<TranscriptTurn>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT COALESCE(speaker, ''), audio_start_time, audio_end_time FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time",
+    ).bind(meeting_id).fetch_all(pool).await
+}
+
+/// Spans of 2 to 15 seconds that carry exactly `speaker` and overlap no line
+/// with any other label, combined labels included.
+pub(crate) fn clean_turns(rows: &[TranscriptTurn], speaker: &str) -> Vec<(f64, f64)> {
+    let span = |(_, start, end): &TranscriptTurn| Some((start.as_ref()?.to_owned(), end.as_ref()?.to_owned()));
+    let others: Vec<(f64, f64)> = rows.iter().filter(|(label, _, _)| label != speaker).filter_map(span).collect();
+    rows.iter().filter(|(label, _, _)| label == speaker).filter_map(span)
+        .filter(|(start, end)| {
+            start.is_finite()
+                && end.is_finite()
+                && *start >= 0.0
+                && end - start >= 2.0
+                && end - start <= 15.0
+        })
+        .filter(|(start, end)| {
+            !others
+                .iter()
+                .any(|(other_start, other_end)| other_start < end && other_end > start)
+        })
+        .collect()
+}
+
+/// Mean embedding per label from up to `MATCH_TURNS` of its turns. Labels
+/// with fewer than two embedded turns are left out. Blocking: decodes the
+/// track and runs WeSpeaker, so callers use `spawn_blocking`.
+pub(crate) fn embed_label_means(track: &Path, turns: &HashMap<String, Vec<(f64, f64)>>) -> Result<HashMap<String, Vec<f32>>> {
+    let audio = crate::audio::decoder::decode_audio_file(track)?.to_whisper_format();
+    let mut models = DiarizationModels::load(&super::diarization_model_dir())?;
+    let mut means = HashMap::new();
+    for (label, spans) in turns {
+        let mut mean = vec![0.0f32; 128];
+        let mut count = 0;
+        for &(start, end) in spread(spans, MATCH_TURNS).iter() {
+            let first = (start * 16_000.0) as usize;
+            let last = (end * 16_000.0) as usize;
+            if first >= last || last > audio.len() { continue; }
+            if let Ok(vector) = models.embed(&audio[first..last]) {
+                if vector.len() == 128 {
+                    for (target, value) in mean.iter_mut().zip(&vector) { *target += *value; }
+                    count += 1;
+                }
+            }
+        }
+        if count >= 2 { means.insert(label.clone(), mean); }
+    }
+    Ok(means)
+}
+
+/// True when this contact's appearance in the meeting was named by a voice
+/// match rather than by the user. Such meetings never train their voice.
+pub(crate) async fn is_automatic(pool: &SqlitePool, meeting_id: &str, person_id: &str) -> bool {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM voice_speaker_matches WHERE meeting_id = ? AND person_id = ? AND status = 'applied'",
+    ).bind(meeting_id).bind(person_id).fetch_one(pool).await.map(|count| count > 0).unwrap_or(false)
+}
+
+/// Learns a voice after the user names a speaker. Quietly does nothing when
+/// the feature is off, the models are missing, the name came from a voice
+/// match, or the meeting has no clear audio of them.
+pub(crate) async fn learn_tagged_speaker(pool: &SqlitePool, meeting_id: &str, speaker: &str) -> Option<VoiceProfileInfo> {
+    if !enabled() || !super::pyannote_models_available() { return None; }
+    let person: Option<String> = sqlx::query_scalar(
+        "SELECT person_id FROM person_speakers WHERE meeting_id = ? AND speaker_label = ?",
+    ).bind(meeting_id).bind(speaker).fetch_optional(pool).await.ok().flatten();
+    if let Some(person) = &person {
+        if is_automatic(pool, meeting_id, person).await { return None; }
+    }
+    let outcome = match meeting_share(pool, meeting_id, speaker).await {
+        Ok((person_id, name, share)) => store_shares(&person_id, &name, vec![share], false),
+        Err(error) => Err(error),
+    };
+    match outcome {
+        Ok(info) => {
+            log::info!("Learned {}'s voice from a tagged meeting ({} turns)", info.name, info.samples);
+            Some(info)
+        }
+        Err(error) => {
+            log::info!("Did not learn a voice for a tagged speaker: {}", String::from(error));
+            None
+        }
+    }
+}
+
+/// Removes one meeting's share after the contact is no longer named in it.
+/// A voice left without two turns is forgotten. Returns whether it changed.
+pub(crate) fn drop_meeting_share(person_id: &str, meeting_id: &str) -> bool {
+    let mut changed = false;
+    if let Err(error) = edit_profiles(|profiles| {
+        changed = remove_share(profiles, person_id, meeting_id);
+        changed
+    }) {
+        log::warn!("Could not remove a meeting from a voice: {error}");
+    }
+    changed
+}
+
+fn remove_share(profiles: &mut Vec<VoiceProfile>, person_id: &str, meeting_id: &str) -> bool {
+    let Some(index) = profiles.iter().position(|profile| profile.person_id == person_id) else { return false };
+    let shares = profiles[index].shares();
+    if !shares.iter().any(|share| share.meeting_id == meeting_id) { return false; }
+    let kept: Vec<VoiceSource> = shares.into_iter().filter(|share| share.meeting_id != meeting_id).collect();
+    let profile = &profiles[index];
+    match build_profile(profile.person_id.clone(), profile.name.clone(), kept) {
+        Ok(rebuilt) => profiles[index] = rebuilt,
+        Err(_) => { profiles.remove(index); }
+    }
+    true
 }
 
 /// One meeting's share of a named speaker's voice, with the contact it
@@ -388,41 +545,14 @@ async fn meeting_share(
     let folder: Option<String> = sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
         .bind(meeting_id).fetch_optional(pool).await.map_err(failed)?.flatten();
     let folder = folder.ok_or_else(|| Meeting("This meeting has no saved audio.".into()))?;
-    let folder = PathBuf::from(folder);
-    let track = folder.join(
-        if crate::audio::recording_saver::is_room_microphone_recording(&folder) {
-            "mic.mp4"
-        } else {
-            "system.mp4"
-        },
-    );
+    let track = call_track(Path::new(&folder));
     if !track.is_file() {
         return Err(Meeting(
             "This meeting has no separate call audio to learn from. Recordings made with Save audio on keep it; imported files do not.".into(),
         ));
     }
-    let rows: Vec<(String, Option<f64>, Option<f64>)> = sqlx::query_as(
-        "SELECT COALESCE(speaker, ''), audio_start_time, audio_end_time FROM transcripts WHERE meeting_id = ? ORDER BY audio_start_time",
-    ).bind(meeting_id).fetch_all(pool).await.map_err(failed)?;
-    let others: Vec<(f64, f64)> = rows.iter().filter(|(label, _, _)| label != speaker)
-        .filter_map(|(_, start, end)| Some((start.as_ref()?.to_owned(), end.as_ref()?.to_owned())))
-        .collect();
-    let clear: Vec<(f64, f64)> = rows.iter().filter(|(label, _, _)| label == speaker)
-        .filter_map(|(_, start, end)| Some((start.as_ref()?.to_owned(), end.as_ref()?.to_owned())))
-        .filter(|(start, end)| {
-            start.is_finite()
-                && end.is_finite()
-                && *start >= 0.0
-                && end - start >= 2.0
-                && end - start <= 15.0
-        })
-        .filter(|(start, end)| {
-            !others
-                .iter()
-                .any(|(other_start, other_end)| other_start < end && other_end > start)
-        })
-        .collect();
-    let turns = spread(&clear, LEARN_TURNS);
+    let rows = transcript_turns(pool, meeting_id).await.map_err(failed)?;
+    let turns = spread(&clean_turns(&rows, speaker), LEARN_TURNS);
     let no_clear_turn = || {
         Meeting(format!(
         "{name} has no clear turn of 2 to 15 seconds, with nobody talking over them, in this meeting."
@@ -472,8 +602,14 @@ pub async fn enroll_voice_profile(
     meeting_id: String,
     speaker: String,
 ) -> Result<VoiceProfileInfo, String> {
-    let (person_id, name, share) = meeting_share(state.db_manager.pool(), &meeting_id, &speaker).await?;
-    Ok(store_shares(&person_id, &name, vec![share], false)?)
+    let pool = state.db_manager.pool();
+    let (person_id, name, share) = meeting_share(pool, &meeting_id, &speaker).await?;
+    let info = store_shares(&person_id, &name, vec![share], false)?;
+    // Remembering a voice from an automatically named speaker confirms the
+    // name, so this meeting becomes an ordinary source of their voice.
+    let _ = sqlx::query("DELETE FROM voice_speaker_matches WHERE meeting_id = ? AND person_id = ? AND status = 'applied'")
+        .bind(&meeting_id).bind(&person_id).execute(pool).await;
+    Ok(info)
 }
 
 /// Learns a contact's voice. With a meeting, that meeting's audio is added to
@@ -493,6 +629,8 @@ pub async fn enroll_person_voice(
         "SELECT ps.meeting_id, ps.speaker_label FROM person_speakers ps \
          JOIN meetings m ON m.id = ps.meeting_id \
          WHERE ps.person_id = ? AND (? IS NULL OR ps.meeting_id = ?) \
+         AND NOT EXISTS (SELECT 1 FROM voice_speaker_matches v WHERE v.meeting_id = ps.meeting_id \
+             AND v.person_id = ps.person_id AND v.status = 'applied') \
          ORDER BY m.created_at DESC LIMIT ?",
     ).bind(&person_id).bind(&meeting_id).bind(&meeting_id).bind(MAX_SOURCES as i64)
         .fetch_all(pool).await.map_err(|error| error.to_string())?;
@@ -731,6 +869,34 @@ mod tests {
         assert_eq!(picked.len(), 20);
         assert_eq!((picked[0], picked[19]), (0, 95));
         assert_eq!(spread(&turns[..5], 20).len(), 5);
+    }
+
+    #[test]
+    fn untagging_removes_only_that_meetings_share() {
+        let both = build_profile("p1".into(), "Alice".into(), vec![share("m1", 0, 2), share("m2", 1, 3)]).unwrap();
+        let mut profiles = vec![both];
+        assert!(remove_share(&mut profiles, "p1", "m1"));
+        assert_eq!((profiles[0].samples, profiles[0].info().meetings), (3, 1));
+        assert!(!remove_share(&mut profiles, "p1", "m1"));
+        // Its last meeting gone, the voice is forgotten.
+        assert!(remove_share(&mut profiles, "p1", "m2"));
+        assert!(profiles.is_empty());
+    }
+
+    #[test]
+    fn clean_turns_skip_short_long_and_overlapped_lines() {
+        let row = |label: &str, start: f64, end: f64| (label.to_string(), Some(start), Some(end));
+        let rows = vec![
+            row("Speaker 1", 0.0, 3.0),
+            row("Speaker 1", 3.0, 4.0),
+            row("Speaker 1", 10.0, 30.0),
+            row("Speaker 1", 40.0, 45.0),
+            row("Speaker 1 + Speaker 2", 44.0, 46.0),
+            row("Speaker 1", 50.0, 55.0),
+            ("Speaker 1".to_string(), None, None),
+        ];
+        assert_eq!(clean_turns(&rows, "Speaker 1"), vec![(0.0, 3.0), (50.0, 55.0)]);
+        assert!(clean_turns(&rows, "Speaker 2").is_empty());
     }
 
     #[test]

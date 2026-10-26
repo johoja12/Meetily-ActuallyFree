@@ -497,6 +497,12 @@ function handle(cmd: string, args: Args): unknown {
         setTimeout(() => resolve({ person_id: person.id, name: person.displayName, samples: voice.samples, meetings: voice.meetings }), 900),
       );
     }
+    case 'get_voice_learning_running':
+      return false;
+    case 'apply_voices_to_past_meetings':
+      return state.voices.length ? null : Promise.reject('No voices yet. Name a speaker in a meeting to learn their voice.');
+    case 'undo_voice_matches':
+      return [];
     case 'delete_voice_profile':
       state.voices = state.voices.filter((voice) => voice.person_id !== args.personId);
       return null;

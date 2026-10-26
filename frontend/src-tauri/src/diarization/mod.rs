@@ -21,6 +21,7 @@ pub mod live_nemotron;
 pub mod models;
 pub mod nemotron;
 pub mod online;
+pub mod voice_learning;
 pub mod voice_profiles;
 pub mod voiceprint;
 
@@ -736,15 +737,18 @@ pub async fn rename_meeting_speaker(
     to: String,
 ) -> Result<MeetingSpeakerRenameResult, String> {
     let _operation_guard = operation_guard().await;
+    let pool = state.db_manager.pool();
+    let edit = voice_learning::before_speaker_edit(pool, &meeting_id, &from).await;
 
     let outcome = crate::database::repositories::person::PeopleRepository::rename_meeting_speaker(
-        state.db_manager.pool(),
+        pool,
         &meeting_id,
         &from,
         &to,
     )
     .await
     .map_err(|e| format!("Failed to rename speaker: {}", e))?;
+    voice_learning::after_speaker_edit(pool, edit, &outcome.speaker).await;
     log::info!(
         "🧑‍🤝‍🧑 Renamed speaker '{}' → '{}' across {} segments of meeting {}",
         from, outcome.speaker, outcome.count, meeting_id
@@ -766,8 +770,15 @@ pub async fn reassign_transcript_speaker(
     from: Option<String>,
 ) -> Result<MeetingSpeakerRenameResult, String> {
     let _operation_guard = operation_guard().await;
+    let pool = state.db_manager.pool();
+    let moved_from = match &from {
+        Some(component) => Some(component.clone()),
+        None => sqlx::query_scalar("SELECT speaker FROM transcripts WHERE id = ? AND meeting_id = ?")
+            .bind(&transcript_id).bind(&meeting_id).fetch_optional(pool).await.ok().flatten(),
+    };
+    let edit = voice_learning::before_speaker_edit(pool, &meeting_id, moved_from.as_deref().unwrap_or("")).await;
     let outcome = crate::database::repositories::person::PeopleRepository::reassign_transcript_speaker_component(
-        state.db_manager.pool(),
+        pool,
         &meeting_id,
         &transcript_id,
         from.as_deref(),
@@ -775,6 +786,7 @@ pub async fn reassign_transcript_speaker(
     )
     .await
     .map_err(|e| format!("Failed to move this line: {}", e))?;
+    voice_learning::after_speaker_edit(pool, edit, &outcome.speaker).await;
     Ok(MeetingSpeakerRenameResult {
         speaker: outcome.speaker,
         count: outcome.count,
@@ -1564,6 +1576,10 @@ pub async fn diarize_meeting(
         result.num_speakers,
         assignments.len()
     );
+
+    // Room-microphone and single-track meetings get no profile names above;
+    // the background pass matches their new labels against saved voices.
+    voice_learning::check(&meeting_id);
 
     Ok(MeetingDiarizationResult {
         num_speakers: result.num_speakers,

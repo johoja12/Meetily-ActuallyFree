@@ -18,6 +18,8 @@ import { useLabs } from '@/hooks/useLabs';
 import { useVoiceProfiles } from '@/hooks/useVoiceProfiles';
 import { setLabsFeature, syncLabsFromBackend, type LabsFeature } from '@/lib/labs-features';
 import { describeVoiceError, describeVoiceSource, forgetVoice } from '@/lib/voice-profiles';
+import { applyVoicesToPastMeetings, getVoiceLearningRunning, VOICE_LEARNING_STATUS_EVENT } from '@/lib/voice-matches';
+import { listen } from '@tauri-apps/api/event';
 
 interface Feature {
   key: LabsFeature;
@@ -94,8 +96,8 @@ const GROUPS: Array<{ title: string; features: Feature[] }> = [
         icon: Fingerprint,
         title: 'Voice profiles',
         description:
-          "Learn a contact's voice from the meetings they spoke in. When speakers are identified in later meetings, a matching voice gets their name.",
-        where: "Learn, update or forget a voice on a contact's page, or add one meeting's audio from its speaker card.",
+          "Naming a speaker learns that contact's voice. Unnamed speakers in other meetings, past and future, that match a voice get their name, with an Undo.",
+        where: "Voices learn as you name speakers. Update or forget one on a contact's page, or here.",
       },
     ],
   },
@@ -140,12 +142,32 @@ function FeatureRow({
 function LearnedVoices() {
   const profiles = useVoiceProfiles();
   const [modelsReady, setModelsReady] = useState<boolean | null>(null);
+  const [learning, setLearning] = useState(false);
 
   useEffect(() => {
     invoke<{ pyannote_available?: boolean }>('diarization_get_status')
       .then((status) => setModelsReady(!!status.pyannote_available))
       .catch(() => setModelsReady(null));
   }, []);
+
+  // The native worker learns and matches in the background.
+  useEffect(() => {
+    let stop: (() => void) | undefined;
+    let disposed = false;
+    getVoiceLearningRunning().then((running) => !disposed && setLearning(running)).catch(() => undefined);
+    listen<{ running: boolean }>(VOICE_LEARNING_STATUS_EVENT, ({ payload }) => setLearning(!!payload.running))
+      .then((unlisten) => (disposed ? unlisten() : (stop = unlisten)))
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+      stop?.();
+    };
+  }, []);
+
+  const applyToPast = () =>
+    applyVoicesToPastMeetings()
+      .then(() => toast.success('Checking past meetings', { description: 'Matching speakers get their names in the background.' }))
+      .catch((error) => toast.error('Could not check past meetings', { description: describeVoiceError(error) }));
 
   return (
     <div className="space-y-2">
@@ -162,7 +184,7 @@ function LearnedVoices() {
         <div className="af-skeleton h-10 rounded-lg" />
       ) : profiles.length === 0 ? (
         <p className="text-xs leading-relaxed text-af-text-3">
-          No voices yet. Open a contact from{' '}
+          No voices yet. Name a speaker in a meeting and their voice is learned, or open a contact from{' '}
           <Link href="/contacts" className="font-medium text-af-accent hover:underline">
             Contacts
           </Link>{' '}
@@ -198,6 +220,21 @@ function LearnedVoices() {
           ))}
         </ul>
       )}
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          onClick={applyToPast}
+          disabled={learning || !profiles?.length}
+          className="rounded-lg border border-af-border px-3 py-1.5 text-xs font-medium text-af-text-2 transition-colors hover:bg-af-hover hover:text-af-text disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Apply voices to past meetings
+        </button>
+        {learning && (
+          <span className="flex items-center gap-1.5 text-[11px] text-af-text-3" role="status">
+            <Spinner size={12} /> Learning voices…
+          </span>
+        )}
+      </div>
     </div>
   );
 }

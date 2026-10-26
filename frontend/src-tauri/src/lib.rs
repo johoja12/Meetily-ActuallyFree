@@ -498,6 +498,7 @@ pub fn run() {
             }
             #[cfg(windows)]
             onnx_runtime::initialize(_app.handle());
+            diarization::voice_learning::start(_app.handle().clone());
             log::info!("Application setup complete");
 
             // Initialize system tray
@@ -658,6 +659,9 @@ pub fn run() {
             diarization::voice_profiles::enroll_person_voice,
             diarization::voice_profiles::list_voice_profiles,
             diarization::voice_profiles::delete_voice_profile,
+            diarization::voice_learning::undo_voice_matches,
+            diarization::voice_learning::apply_voices_to_past_meetings,
+            diarization::voice_learning::get_voice_learning_running,
             save_transcript,
             analytics::commands::init_analytics,
             analytics::commands::disable_analytics,
