@@ -11,9 +11,6 @@ pub struct SyncConfig {
     pub device_name: String,
     pub library_root: Option<PathBuf>,
     pub enabled: bool,
-    /// Libraries whose existing rows this device has already published.
-    #[serde(default)]
-    pub seeded: Vec<PathBuf>,
 }
 
 static CACHE: Mutex<Option<SyncConfig>> = Mutex::new(None);

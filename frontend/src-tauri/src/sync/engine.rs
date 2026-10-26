@@ -832,7 +832,4 @@ mod tests {
         let key = serde_json::json!({"from_id": "p2", "kind": "person"});
         assert_eq!(key_string(spec, &key), r#"{"kind":"person","from_id":"p2"}"#);
     }
-
-    #[allow(dead_code)]
-    fn unused(_: &Path) {}
 }
