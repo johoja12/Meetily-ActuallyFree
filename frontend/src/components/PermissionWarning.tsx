@@ -7,6 +7,7 @@ import { useIsLinux } from '@/hooks/usePlatform';
 import type { SystemAudioPermission } from '@/hooks/usePermissionCheck';
 
 interface PermissionWarningProps {
+  roomMicrophone?: boolean;
   hasMicrophone: boolean;
   hasSystemAudio: boolean;
   systemAudioPermission?: SystemAudioPermission;
@@ -17,6 +18,7 @@ interface PermissionWarningProps {
 
 /** Explains a missing microphone or system audio permission, with ways to fix it. */
 export function PermissionWarning({
+  roomMicrophone = false,
   hasMicrophone,
   hasSystemAudio,
   systemAudioPermission = 'unknown',
@@ -26,8 +28,10 @@ export function PermissionWarning({
 }: PermissionWarningProps) {
   const isLinux = useIsLinux();
 
+  const systemAudioUnavailable = !hasSystemAudio && !roomMicrophone;
+
   // Linux has no permission prompts; nothing to explain when both work.
-  if (isLinux || (hasMicrophone && hasSystemAudio)) return null;
+  if (isLinux || (hasMicrophone && !systemAudioUnavailable)) return null;
 
   const isMacOS = navigator.userAgent.includes('Mac');
   const openSettings = (preferencePane: string) =>
@@ -35,7 +39,7 @@ export function PermissionWarning({
       console.error(`Failed to open ${preferencePane} settings:`, error),
     );
 
-  const title = !hasMicrophone && !hasSystemAudio
+  const title = !hasMicrophone && systemAudioUnavailable
     ? 'Meetily can’t hear your microphone or computer audio'
     : !hasMicrophone
       ? 'Meetily can’t hear your microphone'
@@ -61,7 +65,7 @@ export function PermissionWarning({
             app has taken it over.
           </p>
         )}
-        {!hasSystemAudio && (
+        {systemAudioUnavailable && (
           <p>
             {hasMicrophone
               ? 'You can still record your microphone, but the other side of the call won’t be captured.'
@@ -76,7 +80,7 @@ export function PermissionWarning({
               Microphone settings
             </Button>
           )}
-          {isMacOS && !hasSystemAudio && (
+          {isMacOS && systemAudioUnavailable && (
             <Button size="sm" variant="secondary" onClick={() => openSettings('Privacy_AudioCapture')}>
               <Speaker />
               Audio Capture settings

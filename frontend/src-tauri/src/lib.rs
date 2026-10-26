@@ -34,16 +34,21 @@ macro_rules! perf_trace {
 
 // Declare audio module
 pub mod analytics;
+pub mod anthropic;
 pub mod api;
 pub mod app_update;
 pub mod audio;
+pub mod calendar;
 pub mod claude_cli;
 pub mod config;
 pub mod console_utils;
 pub mod crash_report;
 pub mod database;
 pub mod diarization;
-mod optional_models;
+pub mod groq;
+pub mod live_assistant;
+pub mod meeting_detection;
+pub mod minibar;
 pub mod notifications;
 pub mod ollama;
 pub mod onboarding;
@@ -53,12 +58,8 @@ pub mod onnx_runtime;
 #[path = "../build/onnxruntime.rs"]
 mod onnx_runtime_build_tests;
 pub mod openai;
-pub mod anthropic;
-pub mod groq;
 pub mod openrouter;
-pub mod live_assistant;
-pub mod meeting_detection;
-pub mod minibar;
+mod optional_models;
 pub mod parakeet_engine;
 pub mod paths;
 pub mod state;
@@ -67,7 +68,7 @@ pub mod tray;
 pub mod utils;
 pub mod whisper_engine;
 
-use audio::{list_audio_devices, AudioDevice, trigger_audio_permission};
+use audio::{list_audio_devices, trigger_audio_permission, AudioDevice};
 use log::{error as log_error, info as log_info};
 use notifications::commands::NotificationManagerState;
 use std::sync::Arc;
@@ -84,7 +85,12 @@ static LANGUAGE_PREFERENCE: std::sync::LazyLock<StdMutex<String>> =
 #[tauri::command]
 fn get_check_updates_on_launch() -> bool {
     std::fs::read_to_string(paths::install_data_root().join("check-updates-on-launch.txt"))
-        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "yes" | "true" | "1"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "yes" | "true" | "1"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -533,6 +539,7 @@ pub fn run() {
             // Meeting detection: load persisted settings and start the monitor
             // if the user enabled it (default off).
             crate::meeting_detection::initialize(&_app.handle());
+            crate::calendar::initialize(&_app.handle());
 
             // Free Whisper/Parakeet VRAM a couple minutes after last STT use.
             audio::common::start_stt_idle_unloader();
@@ -804,6 +811,13 @@ pub fn run() {
             database::repositories::meeting_notes::api_get_meeting_notes,
             database::repositories::meeting_notes::api_save_meeting_notes,
             api::api_get_meeting_audio,
+            calendar::calendar_snapshot,
+            calendar::calendar_connect,
+            calendar::calendar_refresh,
+            calendar::calendar_update_settings,
+            calendar::calendar_disconnect,
+            calendar::calendar_take_prompts,
+            calendar::saved::calendar_recording_suggestions,
             meeting_detection::get_meeting_detection_settings,
             meeting_detection::set_meeting_detection_settings,
             meeting_detection::start_meeting_detection,

@@ -1,25 +1,10 @@
 //! Transcription worker pool: consumes VAD speech segments and produces
 //! transcript lines, which are emitted to the UI as `transcript-update` events.
 //!
-//! ## Where the input comes from
-//! Segments arrive from `AudioPipeline` and are **mixed** mic+system audio at
-//! 16 kHz. Their `device_type` is a placeholder and carries no speaker
-//! information — see the pipeline module docs.
-//!
-//! ## Speaker labelling
-//! Each segment is labelled before being emitted:
-//!
-//! 1. **Live diarization** (preferred) — `crate::diarization::online` embeds the
-//!    segment and matches it against voices heard so far, yielding
-//!    "Speaker 1/2/3". Active only when the diarization models are installed.
-//! 2. **Capture-source fallback** — reads `device_type`, which for mixed audio
-//!    can only ever produce "You". Retained purely so transcripts still carry
-//!    some label without the models.
-//!
-//! The label travels to the frontend as `TranscriptUpdate.source`, which
-//! `TranscriptContext` maps onto `Transcript.speaker` for rendering. Running the
-//! "Speakers" action on a finished meeting re-runs full offline diarization and
-//! overwrites these live labels with more accurate ones.
+//! Microphone and system chunks retain independent capture provenance. Personal
+//! microphone sessions label microphone speech as You; room microphone sessions
+//! diarize it without enrolling the room as the local user's voice. The selected
+//! engine is shared with the continuous observer, never silently substituted.
 
 use super::engine::TranscriptionEngine;
 use super::provider::TranscriptionError;
@@ -75,18 +60,21 @@ fn should_emit_transcript(transcript: &str, _confidence: Option<f32>) -> bool {
 pub fn start_transcription_task<R: Runtime>(
     app: AppHandle<R>,
     transcription_receiver: tokio::sync::mpsc::UnboundedReceiver<AudioChunk>,
+    room_microphone: bool,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         info!("🚀 Starting optimized parallel transcription task - guaranteeing zero chunk loss");
 
         let vocabulary = match app.try_state::<AppState>() {
-            Some(state) => match VocabularyRepository::get_effective(state.db_manager.pool(), None).await {
-                Ok(prompt) => prompt,
-                Err(error) => {
-                    warn!("Failed to load transcription vocabulary: {}", error);
-                    None
+            Some(state) => {
+                match VocabularyRepository::get_effective(state.db_manager.pool(), None).await {
+                    Ok(prompt) => prompt,
+                    Err(error) => {
+                        warn!("Failed to load transcription vocabulary: {}", error);
+                        None
+                    }
                 }
-            },
+            }
             None => None,
         };
 
@@ -187,17 +175,17 @@ pub fn start_transcription_task<R: Runtime>(
 
                             // Speaker label for this segment.
                             //
-                            // Dual-path STT (AudioPipeline) sends mic and system as
-                            // separate chunks with a real `device_type`. Mic audio is
-                            // always the local user → "You" (UI substitutes their
-                            // display name). System audio is remote parties →
-                            // diarize into Speaker N when models are available.
+                            // Keep the physical source even when room mode diarizes
+                            // microphone speech. Only personal mic audio establishes You.
                             crate::audio::common::mark_stt_activity();
-                        let nemotron_remote = matches!(chunk.device_type, crate::audio::recording_state::DeviceType::System)
-                            && crate::diarization::live_nemotron::active();
-                        let profile_samples = nemotron_remote.then(|| chunk.data.clone());
-                        let mut chunk_source = match &chunk.device_type {
-                                crate::audio::recording_state::DeviceType::Microphone => {
+                            let nemotron_remote =
+                                chunk.device_type.feeds_diarization(room_microphone)
+                                    && crate::diarization::live_nemotron::active();
+                            let profile_samples = nemotron_remote.then(|| chunk.data.clone());
+                            let mut chunk_source = match &chunk.device_type {
+                                crate::audio::recording_state::DeviceType::Microphone
+                                    if !room_microphone =>
+                                {
                                     // Still feed the online diarizer so it learns the
                                     // user's voice embedding for later offline refine.
                                     let _ = crate::diarization::online::assign_speaker(
@@ -206,7 +194,8 @@ pub fn start_transcription_task<R: Runtime>(
                                     );
                                     "You".to_string()
                                 }
-                                crate::audio::recording_state::DeviceType::System => {
+                                crate::audio::recording_state::DeviceType::System
+                                | crate::audio::recording_state::DeviceType::Microphone => {
                                     match crate::diarization::online::assign_speaker(
                                         &chunk.data,
                                         false,
@@ -215,8 +204,11 @@ pub fn start_transcription_task<R: Runtime>(
                                             // System path shouldn't be the user; keep a speaker id.
                                             format!("Speaker {}", s.index + 1)
                                         }
-                                        Some(s) => s.profile_name.unwrap_or_else(|| format!("Speaker {}", s.index + 1)),
-                                        None => "Guest".to_string(),
+                                        Some(s) => s
+                                            .profile_name
+                                            .unwrap_or_else(|| format!("Speaker {}", s.index + 1)),
+                                        None => if room_microphone { "Room" } else { "Guest" }
+                                            .to_string(),
                                     }
                                 }
                                 // Mixed is for disk only — never STT'd.
@@ -243,8 +235,8 @@ pub fn start_transcription_task<R: Runtime>(
                                         let name = profile_samples.as_deref()
                                             .and_then(|samples| crate::diarization::voice_profiles::name_live_nemotron_turn(&label, samples));
                                         Some(name.unwrap_or(label))
-                                    }).await.ok().flatten().unwrap_or_else(|| "Guest".into());
-                                }
+                                    }).await.ok().flatten().unwrap_or_else(|| if room_microphone { "Room" } else { "Guest" }.into());
+                                    }
                                     let confidence_str = match confidence_opt {
                                         Some(c) => format!("{:.2}", c),
                                         None => "N/A".to_string(),

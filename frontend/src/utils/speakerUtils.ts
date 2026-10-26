@@ -71,7 +71,7 @@ const TEXT_CLASS: Record<Exclude<GroupColor, 'slate'>, string> = {
 /** A voice not identified yet: "Speaker 2", "Guest". */
 export function isUnnamedSpeaker(speaker?: string | null): boolean {
   const label = (speaker ?? '').trim();
-  return !label || /^speaker(\s+\d+)?$/i.test(label) || /^guest\b/i.test(label);
+  return !label || /^room$/i.test(label) || /^speaker(\s+\d+)?$/i.test(label) || /^guest\b/i.test(label);
 }
 
 /**

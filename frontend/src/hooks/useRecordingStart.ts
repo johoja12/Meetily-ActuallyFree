@@ -7,6 +7,7 @@ import { useConfig } from '@/contexts/ConfigContext';
 import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateContext';
 import { recordingService } from '@/services/recordingService';
 import { readPendingGroup } from '@/lib/groups';
+import { takeCalendarRecording } from '@/lib/calendar-meetings';
 import { automaticTitle, beginLiveSession } from '@/lib/live-session';
 import { AUTO_START_KEY, START_RECORDING_EVENT } from '@/lib/recording-launch';
 import { beginAutomatedRecording, endAutomatedRecording, takeAutomatedStart } from '@/lib/meeting-automation';
@@ -165,7 +166,8 @@ export function useRecordingStart(
     try {
       const startedAt = Date.now();
       const group = readPendingGroup();
-      const title = automaticTitle(new Date(startedAt), group?.name, meetings.map((meeting) => meeting.title));
+      const calendarEvent = takeCalendarRecording(startedAt);
+      const title = calendarEvent?.title ?? automaticTitle(new Date(startedAt), group?.name, meetings.map((meeting) => meeting.title));
       setMeetingTitle(title);
       setStatus(RecordingStatus.STARTING, 'Starting audio capture…');
 
@@ -176,7 +178,7 @@ export function useRecordingStart(
       );
 
       // RECORDING status itself arrives from Rust via RecordingStateContext.
-      beginLiveSession(title, startedAt);
+      beginLiveSession(title, startedAt, !!calendarEvent);
       setIsRecording(true);
       clearTranscripts();
       setIsMeetingActive(true);

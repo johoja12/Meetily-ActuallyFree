@@ -257,7 +257,7 @@ jobs:
 
           with open(sys.argv[1], "rb") as entitlements_file:
               actual = plistlib.load(entitlements_file)
-          expected = {"com.apple.security.device.audio-input": True}
+          expected = {"com.apple.security.device.audio-input": True, "com.apple.security.personal-information.calendars": True}
           if actual != expected:
               raise SystemExit(f"Unexpected entitlements: {actual!r}")
           PY

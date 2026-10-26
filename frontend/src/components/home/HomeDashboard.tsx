@@ -6,6 +6,8 @@
  * recurring groups (or recent meetings when nothing is scheduled), and what is
  * still open. Everything is quiet until you point at it.
  */
+import { CalendarAgenda } from '@/components/calendar/CalendarMeetings';
+import { useRoomMicrophone } from '@/hooks/useRoomMicrophone';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useWorkspace } from '@/contexts/WorkspaceContext';
@@ -67,6 +69,7 @@ function useOpenItems() {
 }
 
 export function HomeDashboard() {
+  const room = useRoomMicrophone();
   const now = useNow();
   const { groups } = useWorkspace();
   const { meetings } = useSidebar();
@@ -96,15 +99,17 @@ export function HomeDashboard() {
       <div className="mx-auto flex min-h-full w-full max-w-3xl flex-col px-10 pb-44 pt-[12vh]">
         {!isChecking && (
           <PermissionWarning
+            roomMicrophone={room.enabled}
             hasMicrophone={hasMicrophone}
             hasSystemAudio={hasSystemAudio}
             systemAudioPermission={systemAudioPermission}
-            onRecheck={requestPermissions}
+            onRecheck={() => { void requestPermissions(!room.enabled); }}
             isRechecking={isChecking}
             className="mb-10"
           />
         )}
 
+        <CalendarAgenda />
         <div className="af-appear text-center">
           <p className="text-7xl font-extralight tracking-tight text-af-text/85 tabular-nums">{time}</p>
           <p className="mt-2 text-base text-af-text-3">{date}</p>

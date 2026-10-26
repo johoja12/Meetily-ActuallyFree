@@ -1,11 +1,11 @@
+use anyhow::Result;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::mpsc;
-use anyhow::Result;
 
-use super::devices::AudioDevice;
 use super::buffer_pool::AudioBufferPool;
+use super::devices::AudioDevice;
 
 /// Device type for audio chunks
 #[derive(Debug, Clone, PartialEq)]
@@ -14,6 +14,16 @@ pub enum DeviceType {
     System,
     /// Pre-mixed mic+system for the playback file (`audio.mp4`).
     Mixed,
+}
+
+impl DeviceType {
+    /// One source owns the streaming diarization clock for the entire session.
+    pub fn feeds_diarization(&self, room_microphone: bool) -> bool {
+        matches!(
+            (self, room_microphone),
+            (Self::Microphone, true) | (Self::System, false)
+        )
+    }
 }
 
 /// Audio chunk with metadata for processing
@@ -104,6 +114,7 @@ pub struct RecordingStats {
 pub struct RecordingState {
     // Core recording state
     is_recording: AtomicBool,
+    room_microphone: AtomicBool,
     is_paused: AtomicBool,
     microphone_muted: AtomicBool,
     system_audio_muted: AtomicBool,
@@ -145,6 +156,7 @@ impl RecordingState {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             is_recording: AtomicBool::new(false),
+            room_microphone: AtomicBool::new(false),
             is_paused: AtomicBool::new(false),
             microphone_muted: AtomicBool::new(false),
             system_audio_muted: AtomicBool::new(false),
@@ -167,6 +179,15 @@ impl RecordingState {
             microphone_capture_active: AtomicBool::new(false),
             system_capture_active: AtomicBool::new(false),
         })
+    }
+
+    /// Set once before capture; a preference change only affects the next session.
+    pub fn set_room_microphone(&self, room: bool) {
+        self.room_microphone.store(room, Ordering::SeqCst);
+    }
+
+    pub fn room_microphone(&self) -> bool {
+        self.room_microphone.load(Ordering::SeqCst)
     }
 
     // Recording control
@@ -516,6 +537,7 @@ impl Default for RecordingState {
     fn default() -> Self {
         Self {
             is_recording: AtomicBool::new(false),
+            room_microphone: AtomicBool::new(false),
             is_paused: AtomicBool::new(false),
             microphone_muted: AtomicBool::new(false),
             system_audio_muted: AtomicBool::new(false),
@@ -583,5 +605,27 @@ mod tests {
         assert!(!state.has_fatal_error());
         assert_eq!(warnings.load(Ordering::SeqCst), 20);
         assert_eq!(errors.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[cfg(test)]
+mod room_microphone_tests {
+    use super::*;
+
+    #[test]
+    fn room_microphone_selects_one_diarization_source_without_changing_provenance() {
+        for (source, personal, room) in [
+            (DeviceType::Microphone, false, true),
+            (DeviceType::System, true, false),
+            (DeviceType::Mixed, false, false),
+        ] {
+            assert_eq!(source.feeds_diarization(false), personal);
+            assert_eq!(source.feeds_diarization(true), room);
+        }
+        let state = RecordingState::new();
+        assert!(!state.room_microphone());
+        state.set_room_microphone(true);
+        state.start_recording().unwrap();
+        assert!(state.room_microphone());
     }
 }

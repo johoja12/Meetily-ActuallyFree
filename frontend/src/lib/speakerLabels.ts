@@ -9,7 +9,7 @@ export function isGeneratedSpeakerLabel(value: string | null | undefined): boole
   return !!value && /^speaker \d+$/i.test(value.trim());
 }
 
-const NON_LINKABLE_LABELS = new Set(['you', 'guest']);
+const NON_LINKABLE_LABELS = new Set(['you', 'guest', 'room']);
 
 /**
  * True only for a speaker label that names a real, identified person —

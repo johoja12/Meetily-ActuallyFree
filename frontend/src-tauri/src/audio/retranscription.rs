@@ -1,10 +1,10 @@
 // Retranscription module - allows re-processing stored audio with different settings
 
-use crate::audio::decoder::decode_audio_file;
-use crate::audio::vad::get_speech_chunks_with_thresholds_and_progress;
 use super::common::{create_transcript_segments, split_segment_at_silence, write_transcripts_json};
 use super::constants::AUDIO_EXTENSIONS;
-use crate::config::{DEFAULT_WHISPER_MODEL, DEFAULT_PARAKEET_MODEL};
+use crate::audio::decoder::decode_audio_file;
+use crate::audio::vad::get_speech_chunks_with_thresholds_and_progress;
+use crate::config::{DEFAULT_PARAKEET_MODEL, DEFAULT_WHISPER_MODEL};
 use crate::database::models::DateTimeUtc;
 use crate::database::repositories::vocabulary::VocabularyRepository;
 use crate::parakeet_engine::ParakeetEngine;
@@ -199,6 +199,19 @@ fn find_retranscription_sources(folder: &Path, fallback: &Path) -> Vec<Retranscr
     let system_path = folder.join("system.mp4");
     let mut sources = Vec::new();
 
+    if super::recording_saver::is_room_microphone_recording(folder) {
+        return vec![RetranscriptionSource {
+            path: if mic_path.is_file() {
+                mic_path
+            } else {
+                fallback.to_path_buf()
+            },
+            label: "room microphone",
+            speaker_hint: Some("Room"),
+            positive_threshold: 0.20,
+            negative_threshold: 0.10,
+        }];
+    }
     if mic_path.is_file() && system_path.is_file() {
         sources.push(RetranscriptionSource {
             path: mic_path,
@@ -235,7 +248,7 @@ fn is_manual_speaker_label(label: &str) -> bool {
     }
     let is_generated = trimmed.split(" + ").all(|part| {
         let p = part.trim();
-        p.eq_ignore_ascii_case("guest")
+        (p.eq_ignore_ascii_case("guest") || p.eq_ignore_ascii_case("room"))
             || p.eq_ignore_ascii_case("you")
             || p.eq_ignore_ascii_case("unknown")
             || (p.to_ascii_lowercase().starts_with("speaker ")
@@ -822,7 +835,7 @@ async fn get_configured_whisper_model<R: Runtime>(app: &AppHandle<R>) -> Result<
                 error!("Retranscription requires Whisper provider, but configured provider is: {}", provider);
                 Err(anyhow!("Retranscription requires Whisper. Current provider '{}' does not support retranscription with language selection.", provider))
             }
-        },
+        }
         None => {
             // Default to configured Whisper model if no config exists
             warn!("No transcript config found, using default model '{}'", DEFAULT_WHISPER_MODEL);
@@ -922,7 +935,7 @@ async fn get_configured_parakeet_model<R: Runtime>(app: &AppHandle<R>) -> Result
                 warn!("Configured provider is not Parakeet, using default model");
                 Ok(DEFAULT_PARAKEET_MODEL.to_string())
             }
-        },
+        }
         None => {
             // Default to configured Parakeet model if no config exists
             warn!("No transcript config found, using default Parakeet model");
@@ -1074,7 +1087,9 @@ pub async fn cancel_retranscription_command(meeting_id: Option<String>) -> Resul
 #[tauri::command]
 pub async fn is_retranscription_in_progress_command(meeting_id: Option<String>) -> bool {
     match meeting_id {
-        Some(expected) => RETRANSCRIPTION_MEETING.lock().unwrap().as_deref() == Some(expected.as_str()),
+        Some(expected) => {
+            RETRANSCRIPTION_MEETING.lock().unwrap().as_deref() == Some(expected.as_str())
+        }
         None => is_retranscription_in_progress(),
     }
 }
@@ -1093,6 +1108,28 @@ mod tests {
         super::RETRANSCRIPTION_CANCELLED.store(false, std::sync::atomic::Ordering::SeqCst);
     }
     use super::*;
+
+    #[test]
+    fn room_microphone_retranscription_never_assigns_you_or_uses_system_track() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("mic.mp4"), b"mic").unwrap();
+        std::fs::write(temp.path().join("system.mp4"), b"system").unwrap();
+        std::fs::write(
+            temp.path().join("metadata.json"),
+            r#"{"room_microphone":true}"#,
+        )
+        .unwrap();
+        let fallback = temp.path().join("audio.mp4");
+        let sources = find_retranscription_sources(temp.path(), &fallback);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].path, temp.path().join("mic.mp4"));
+        assert_eq!(sources[0].speaker_hint, Some("Room"));
+        std::fs::remove_file(temp.path().join("mic.mp4")).unwrap();
+        assert_eq!(
+            find_retranscription_sources(temp.path(), &fallback)[0].path,
+            fallback
+        );
+    }
 
     #[test]
     fn retranscription_repairs_duration_and_preserves_metadata() {

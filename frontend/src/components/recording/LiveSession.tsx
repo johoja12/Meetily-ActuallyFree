@@ -5,6 +5,7 @@
  * and the people heard so far, the live transcript, and the Speakers | Notes
  * | Ask AI panel. The record card floats over the transcript column.
  */
+import { CalendarTitleSuggestions } from '@/components/calendar/CalendarMeetings';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Copy, Globe, PanelRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -201,6 +202,7 @@ export function LiveSession({
                   </span>
                   <span className="tabular-nums text-af-text-3">{formatClock(elapsed)}</span>
                 </span>
+                <CalendarTitleSuggestions startedAt={live?.startedAt ?? Date.now() - elapsed * 1000} onSelect={rename} disabled={isStopping || isProcessingStop} />
                 <GroupPicker value={pendingGroup?.id ?? null} onChange={changeGroup} placeholder="Add to group" />
                 {detectedSpeakers.length > 0 && (
                   <button

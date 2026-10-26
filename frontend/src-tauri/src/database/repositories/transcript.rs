@@ -16,6 +16,7 @@ impl TranscriptsRepository {
         transcripts: &[TranscriptSegment],
         folder_path: Option<String>,
         recording_started_at: Option<DateTime<Utc>>,
+        manual_title: Option<bool>,
     ) -> Result<String, SqlxError> {
         let meeting_id = format!("meeting-{}", Uuid::new_v4());
 
@@ -24,7 +25,8 @@ impl TranscriptsRepository {
 
         let now = Utc::now();
         let recording_started_at = recording_started_at.unwrap_or(now);
-        let title_is_manual = !is_default_meeting_title(meeting_title);
+        let title_is_manual =
+            manual_title.unwrap_or_else(|| !is_default_meeting_title(meeting_title));
 
         // 1. Create the new meeting
         let result = sqlx::query(
@@ -315,11 +317,43 @@ mod tests {
             audio_start_time: Some(0.0), audio_end_time: Some(2.0), duration: Some(2.0),
             speaker: Some(speaker.into()),
         };
-        let meeting = TranscriptsRepository::save_transcript(&pool, "Test", &[make_turn("Alice"), make_turn("Speaker 2")], None, None)
-            .await.unwrap();
-        let linked: Vec<String> = sqlx::query_scalar("SELECT speaker_label FROM person_speakers WHERE meeting_id = ?")
-            .bind(meeting).fetch_all(&pool).await.unwrap();
+        let meeting = TranscriptsRepository::save_transcript(
+            &pool,
+            "Test",
+            &[make_turn("Alice"), make_turn("Speaker 2")],
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let linked: Vec<String> =
+            sqlx::query_scalar("SELECT speaker_label FROM person_speakers WHERE meeting_id = ?")
+                .bind(meeting)
+                .fetch_all(&pool)
+                .await
+                .unwrap();
         assert_eq!(linked, vec!["Alice"]);
+        let calendar_meeting = TranscriptsRepository::save_transcript(
+            &pool,
+            "New Meeting",
+            &[],
+            None,
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
+        let manual: bool = sqlx::query_scalar("SELECT title_is_manual FROM meetings WHERE id = ?")
+            .bind(&calendar_meeting)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(
+            manual,
+            "A confirmed calendar title remains user-owned even if it looks generic"
+        );
+        assert!(!crate::database::repositories::meeting::MeetingsRepository::update_generated_meeting_title(&pool, &calendar_meeting, "Summary title").await.unwrap());
     }
 
     #[test]

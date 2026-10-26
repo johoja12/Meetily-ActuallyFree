@@ -1,15 +1,15 @@
-use std::sync::{Arc, Mutex};
-use tokio::sync::Mutex as AsyncMutex;
 use anyhow::Result;
-use log::{info, warn, error};
-use tauri::{AppHandle, Runtime, Emitter};
-use tokio::sync::mpsc;
-use serde::{Serialize, Deserialize};
+use log::{error, info, warn};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use tauri::{AppHandle, Emitter, Runtime};
+use tokio::sync::mpsc;
+use tokio::sync::Mutex as AsyncMutex;
 
-use super::recording_state::AudioChunk;
 use super::audio_processing::create_meeting_folder;
 use super::incremental_saver::IncrementalAudioSaver;
+use super::recording_state::AudioChunk;
 
 /// Structured transcript segment for JSON export
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,6 +33,8 @@ pub struct TranscriptSegment {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeetingMetadata {
     pub version: String,
+    #[serde(default)]
+    pub room_microphone: bool,
     pub meeting_id: Option<String>,
     pub meeting_name: Option<String>,
     pub created_at: String,
@@ -40,7 +42,7 @@ pub struct MeetingMetadata {
     pub duration_seconds: Option<f64>,
     pub devices: DeviceInfo,
     pub audio_file: String,
-    /// Dedicated local-user track for reliable offline identity.
+    /// Microphone track; local-user identity only when room_microphone is false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mic_audio_file: Option<String>,
     /// Dedicated system/remote track for remote-speaker clustering.
@@ -60,12 +62,13 @@ pub struct DeviceInfo {
 /// New recording saver using incremental saving strategy.
 /// Writes three tracks when auto-save is on:
 ///   - `audio.mp4`  mixed playback
-///   - `mic.mp4`    local user (You)
+///   - `mic.mp4`    microphone (You in personal mode; multiple voices in room mode)
 ///   - `system.mp4` remote / computer audio
 pub struct RecordingSaver {
     mixed_saver: Option<Arc<AsyncMutex<IncrementalAudioSaver>>>,
     mic_saver: Option<Arc<AsyncMutex<IncrementalAudioSaver>>>,
     system_saver: Option<Arc<AsyncMutex<IncrementalAudioSaver>>>,
+    room_microphone: bool,
     recordings_folder: Option<PathBuf>,
     meeting_folder: Option<PathBuf>,
     meeting_name: Option<String>,
@@ -82,6 +85,7 @@ impl RecordingSaver {
             mixed_saver: None,
             mic_saver: None,
             system_saver: None,
+            room_microphone: false,
             recordings_folder: None,
             meeting_folder: None,
             meeting_name: None,
@@ -100,6 +104,10 @@ impl RecordingSaver {
 
     pub fn set_recordings_folder(&mut self, path: PathBuf) {
         self.recordings_folder = Some(path);
+    }
+
+    pub fn set_room_microphone(&mut self, room: bool) {
+        self.room_microphone = room;
     }
 
     /// Set device information in metadata
@@ -279,7 +287,8 @@ impl RecordingSaver {
         // Create initial metadata
         let metadata = MeetingMetadata {
             version: "1.0".to_string(),
-            meeting_id: None,  // Will be set by backend
+            room_microphone: self.room_microphone,
+            meeting_id: None, // Will be set by backend
             meeting_name: Some(meeting_name.to_string()),
             created_at: chrono::Utc::now().to_rfc3339(),
             completed_at: None,
@@ -392,7 +401,7 @@ impl RecordingSaver {
     pub async fn stop_and_save<R: Runtime>(
         &mut self,
         app: &AppHandle<R>,
-        recording_duration: Option<f64>
+        recording_duration: Option<f64>,
     ) -> Result<Option<String>, String> {
         info!("Stopping recording saver");
 
@@ -476,12 +485,18 @@ impl RecordingSaver {
         if let (Some(folder), Some(mut metadata)) = (&self.meeting_folder, self.metadata.clone()) {
             metadata.status = "completed".to_string();
             metadata.completed_at = Some(chrono::Utc::now().to_rfc3339());
-            metadata.mic_audio_file = mic_audio_path
-                .as_ref()
-                .map(|path| path.file_name().unwrap_or_default().to_string_lossy().into_owned());
-            metadata.system_audio_file = system_audio_path
-                .as_ref()
-                .map(|path| path.file_name().unwrap_or_default().to_string_lossy().into_owned());
+            metadata.mic_audio_file = mic_audio_path.as_ref().map(|path| {
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            });
+            metadata.system_audio_file = system_audio_path.as_ref().map(|path| {
+                path.file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned()
+            });
 
             // Use actual recording duration from RecordingState (more accurate than transcript segments)
             // Falls back to last transcript segment if duration not provided
@@ -553,6 +568,23 @@ impl Default for RecordingSaver {
 mod tests {
     use super::*;
 
+    #[test]
+    fn room_microphone_metadata_is_written_before_capture_and_defaults_for_old_meetings() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(!is_room_microphone_recording(temp.path()));
+        std::fs::write(temp.path().join("metadata.json"), r#"{"version":"1.0"}"#).unwrap();
+        assert!(!is_room_microphone_recording(temp.path()));
+        let mut saver = RecordingSaver::new();
+        saver.set_recordings_folder(temp.path().to_path_buf());
+        saver.set_room_microphone(true);
+        saver.initialize_meeting_folder("Room test", false).unwrap();
+        let folder = saver.meeting_folder.as_ref().unwrap().clone();
+        assert!(is_room_microphone_recording(&folder));
+        // Device metadata updates preserve capture mode.
+        saver.set_device_info(Some("Test microphone".into()), None);
+        assert!(is_room_microphone_recording(&folder));
+    }
+
     fn segment(text: &str) -> TranscriptSegment {
         TranscriptSegment {
             id: "seg_1".to_string(),
@@ -592,4 +624,14 @@ mod tests {
 
         assert!(saver.start_accumulation(true).is_err());
     }
+}
+
+/// Read the recording's immutable capture semantics, never today's preferences.
+/// Older meetings predate this flag and retain personal-microphone behavior.
+pub fn is_room_microphone_recording(folder: &std::path::Path) -> bool {
+    std::fs::read(folder.join("metadata.json"))
+        .ok()
+        .and_then(|data| serde_json::from_slice::<serde_json::Value>(&data).ok())
+        .and_then(|metadata| metadata.get("room_microphone").and_then(|v| v.as_bool()))
+        .unwrap_or(false)
 }

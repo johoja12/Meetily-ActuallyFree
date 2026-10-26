@@ -11,6 +11,7 @@ import { mockIPC, mockWindows } from '@tauri-apps/api/mocks';
 import { MotionGlobalConfig } from 'framer-motion';
 import * as fx from './fixtures';
 import { handleLiveCommand } from './live';
+import type { CalendarSnapshot } from '@/hooks/useCalendar';
 import { CUSTOM_CHROME_CLASS } from '@/lib/window-chrome';
 
 type Args = Record<string, any>;
@@ -53,6 +54,7 @@ const state = {
   recordingPrefs: {
     save_folder: 'C:/Users/preview/Music/meetily-recordings',
     auto_save: true,
+    room_microphone: false,
     file_format: 'mp4',
     preferred_mic_device: null as string | null,
     preferred_system_device: null as string | null,
@@ -64,6 +66,11 @@ const state = {
     per_app_target_name: null as string | null,
     per_app_targets: [] as Array<{ id: string; name: string; executable: string; icon?: string | null }>,
   },
+  calendar: {
+    supported: true, authorization: 'not_determined', busy: false, error: null, last_updated_ms: null,
+    settings: { enabled: false, suggest_titles: true, prompt_recording: true, reminder_minutes: 5, selected_calendar_ids: [] },
+    calendars: [], events: [],
+  } as CalendarSnapshot,
   meetingDetection: {
     enabled: false,
     interval_secs: 15,
@@ -385,6 +392,37 @@ function handle(cmd: string, args: Args): unknown {
       return 'gemma3:1b';
     case 'api_get_api_key':
       return '';
+    case 'calendar_snapshot':
+      return structuredClone(state.calendar);
+    case 'calendar_connect':
+      state.calendar.settings.enabled = true;
+      state.calendar.authorization = 'authorized';
+      state.calendar.calendars = [{ id: 'sample-work', name: 'Sample work calendar' }, { id: 'sample-personal', name: 'Sample personal calendar' }];
+      return structuredClone(state.calendar);
+    case 'calendar_update_settings':
+      state.calendar.settings = { ...state.calendar.settings, ...args.settings };
+      state.calendar.events = state.calendar.settings.selected_calendar_ids.includes('sample-work') ? [
+        { id: 'sample-review', title: 'Design review (sample)', calendar_id: 'sample-work', calendar_name: 'Sample work calendar', start_ms: Date.now() - 5 * 60_000, end_ms: Date.now() + 25 * 60_000, is_meeting: true },
+        { id: 'sample-planning', title: 'Project planning (sample)', calendar_id: 'sample-work', calendar_name: 'Sample work calendar', start_ms: Date.now() + 10 * 60_000, end_ms: Date.now() + 40 * 60_000, is_meeting: true },
+      ] : [];
+      return structuredClone(state.calendar);
+    case 'calendar_refresh':
+      state.calendar.last_updated_ms = Date.now();
+      return structuredClone(state.calendar);
+    case 'calendar_disconnect':
+      state.calendar.settings.enabled = false;
+      state.calendar.events = []; state.calendar.calendars = [];
+      return structuredClone(state.calendar);
+    case 'calendar_recording_suggestions': {
+      const meeting = state.meetings.find(item => item.id === args.meetingId);
+      const start = new Date(meeting?.created_at ?? Date.now()).getTime();
+      return { start_ms: start, end_ms: start + 30 * 60_000, matches: [
+        { id: 'sample-review', title: 'Design review (sample)', offset: -5, overlap: 25 },
+        { id: 'sample-planning', title: 'Project planning (sample)', offset: 15, overlap: 15 },
+      ].map(item => ({ event: { id: item.id, title: item.title, calendar_id: 'sample-work', calendar_name: 'Sample work calendar', start_ms: start + item.offset * 60_000, end_ms: start + (item.offset + 30) * 60_000, is_meeting: true }, overlap_ms: item.overlap * 60_000, gap_ms: 0 })) };
+    }
+    case 'calendar_take_prompts':
+      return []; // Browser preview never posts real reminders.
     case 'get_meeting_detection_settings':
       return { ...state.meetingDetection };
     case 'set_meeting_detection_settings':

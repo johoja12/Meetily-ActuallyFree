@@ -8,7 +8,7 @@
 import { Suspense, useEffect, useState } from 'react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { invoke } from '@tauri-apps/api/core';
-import { AudioLines, Cpu, FileAudio, FlaskConical, Info, Mic, Radar, Settings2, Sparkles, type LucideIcon } from 'lucide-react';
+import { AudioLines, CalendarDays, Cpu, FileAudio, FlaskConical, Info, Mic, Radar, Settings2, Sparkles, type LucideIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useConfig } from '@/contexts/ConfigContext';
 import { useImportDialog } from '@/contexts/ImportDialogContext';
@@ -18,6 +18,7 @@ import { RecordingSettings } from '@/components/RecordingSettings';
 import { TranscriptSettings } from '@/components/TranscriptSettings';
 import { DiarizationSettings } from '@/components/DiarizationSettings';
 import { SummaryModelSettings } from '@/components/SummaryModelSettings';
+import { CalendarSettings } from '@/components/calendar/CalendarSettings';
 import { MeetingDetectionSettings } from '@/components/MeetingDetectionSettings';
 import { OptionalModelDownloads } from '@/components/OptionalModelDownloads';
 import { LocalStackStatus } from '@/components/LocalStackStatus';
@@ -25,13 +26,14 @@ import { AboutSettings } from '@/components/AboutSettings';
 import { LabsSettings } from '@/components/LabsSettings';
 import { AppAudioCard } from '@/components/recording/AppAudioSource';
 
-type SectionId = 'general' | 'recording' | 'transcription' | 'summaries' | 'detection' | 'local' | 'labs' | 'about';
+type SectionId = 'general' | 'recording' | 'transcription' | 'summaries' | 'detection' | 'calendar' | 'local' | 'labs' | 'about';
 
 const SECTIONS: Array<{ id: SectionId; label: string; hint: string; description: string; icon: LucideIcon }> = [
   { id: 'general', label: 'General', hint: 'Theme, name, notifications', description: 'How Meetily looks, what it calls you, and where it keeps your files.', icon: Settings2 },
   { id: 'recording', label: 'Recording', hint: 'Saving, computer audio', description: 'How recordings are saved, and which computer audio they capture.', icon: Mic },
   { id: 'transcription', label: 'Transcription', hint: 'Speech models, speakers', description: 'The speech models that write the transcript, and telling voices apart.', icon: AudioLines },
   { id: 'summaries', label: 'Summaries', hint: 'Model, language', description: 'Which AI model writes summaries and answers Ask AI, and in what language.', icon: Sparkles },
+  { id: 'calendar', label: 'Calendar', hint: 'Meeting titles, reminders', description: 'Use scheduled events to name recordings and remind you to record.', icon: CalendarDays },
   { id: 'detection', label: 'Meeting detection', hint: 'Prompt to record', description: 'Get a prompt to record when a call starts in another app.', icon: Radar },
   { id: 'local', label: 'Local AI', hint: 'Runtime status', description: 'The on-device engines that run transcription and summaries.', icon: Cpu },
   { id: 'labs', label: 'Labs', hint: 'Experimental features', description: 'Experimental features. Each stays off until you turn it on, and may change in later versions.', icon: FlaskConical },
@@ -166,6 +168,7 @@ function SettingsInner() {
               </>
             )}
             {active === 'summaries' && <SummaryModelSettings />}
+            {active === 'calendar' && <CalendarSettings />}
             {active === 'detection' && <MeetingDetectionSettings />}
             {active === 'local' && <LocalStackStatus />}
             {active === 'labs' && <LabsSettings />}

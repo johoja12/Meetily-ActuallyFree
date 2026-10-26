@@ -14,13 +14,13 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tokio::task::JoinHandle;
 
 use super::{
+    default_input_device,  // Get default microphone
+    default_output_device, // Get default system audio
     get_device_and_config,
     parse_audio_device,
-    default_input_device,   // Get default microphone
-    default_output_device,  // Get default system audio
-    RecordingManager,
     DeviceEvent,
-    DeviceMonitorType
+    DeviceMonitorType,
+    RecordingManager,
 };
 
 // Import transcription modules
@@ -276,10 +276,19 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     let mut manager = RecordingManager::new();
 
     // Load recording preferences to get auto_save AND device preferences
-    let (auto_save, preferred_mic_name, preferred_system_name, recordings_folder, per_app_enabled, per_app_targets) =
-        match super::recording_preferences::load_recording_preferences(&app).await {
-            Ok(prefs) => {
-                info!("📋 Loaded recording preferences: auto_save={}, preferred_mic={:?}, preferred_system={:?}, per_app={}, targets={}",
+    let (
+        auto_save,
+        preferred_mic_name,
+        preferred_system_name,
+        recordings_folder,
+        per_app_enabled,
+        per_app_targets,
+    ) = match super::recording_preferences::load_recording_preferences(&app).await {
+        Ok(prefs) => {
+            manager
+                .get_state()
+                .set_room_microphone(prefs.room_microphone);
+            info!("📋 Loaded recording preferences: auto_save={}, preferred_mic={:?}, preferred_system={:?}, per_app={}, targets={}",
                       prefs.auto_save, prefs.preferred_mic_device, prefs.preferred_system_device, prefs.per_app_recording_enabled, prefs.per_app_targets.len());
                 (
                     prefs.auto_save,
@@ -312,24 +321,25 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         Some(pref_name) => {
             info!("ðŸŽ¤ Attempting to use preferred microphone: '{}'", pref_name);
             match parse_audio_device(&pref_name) {
-                Ok(device) => {
-                    match get_device_and_config(&device).await {
-                        Ok(_) => {
-                            info!("âœ… Using preferred microphone: '{}'", device.name);
-                            Some(Arc::new(device))
-                        }
-                        Err(e) => {
-                            warn!("Preferred microphone '{}' is no longer available: {}", pref_name, e);
-                            warn!("Falling back to the current default microphone...");
-                            Some(Arc::new(default_input_device().map_err(|default_err| {
+                Ok(device) => match get_device_and_config(&device).await {
+                    Ok(_) => {
+                        info!("âœ… Using preferred microphone: '{}'", device.name);
+                        Some(Arc::new(device))
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Preferred microphone '{}' is no longer available: {}",
+                            pref_name, e
+                        );
+                        warn!("Falling back to the current default microphone...");
+                        Some(Arc::new(default_input_device().map_err(|default_err| {
                                 format!(
                                     "No microphone device available. Preferred device '{}' was not found, and the default microphone is unavailable: {}",
                                     pref_name, default_err
                                 )
                             })?))
-                        }
                     }
-                }
+                },
                 Err(e) => {
                     warn!("âš ï¸ Preferred microphone '{}' not available: {}", pref_name, e);
                     warn!("   Falling back to system default microphone...");
@@ -368,7 +378,9 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     // SYSTEM AUDIO DEVICE RESOLUTION: Preference â†’ Default â†’ None (optional)
     // ============================================================================
     #[cfg(target_os = "macos")]
-    let system_device = {
+    let system_device = if manager.get_state().room_microphone() {
+        None
+    } else {
         if let Some(pref_name) = preferred_system_name {
             warn!(
                 "Ignoring stored macOS output selection '{}'; the Core Audio tap follows the current default output route",
@@ -388,12 +400,17 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     };
 
     #[cfg(not(target_os = "macos"))]
-    let system_device = match preferred_system_name {
-        Some(pref_name) => {
-            info!("ðŸ”Š Attempting to use preferred system audio: '{}'", pref_name);
-            match parse_audio_device(&pref_name) {
-                Ok(device) => {
-                    match get_device_and_config(&device).await {
+    let system_device = if manager.get_state().room_microphone() {
+        None
+    } else {
+        match preferred_system_name {
+            Some(pref_name) => {
+                info!(
+                    "ðŸ”Š Attempting to use preferred system audio: '{}'",
+                    pref_name
+                );
+                match parse_audio_device(&pref_name) {
+                    Ok(device) => match get_device_and_config(&device).await {
                         Ok(_) => {
                             info!("âœ… Using preferred system audio: '{}'", device.name);
                             Some(Arc::new(device))
@@ -402,36 +419,39 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
                             warn!("Preferred system audio '{}' is no longer available: {}", pref_name, e);
                             default_output_device().ok().map(Arc::new)
                         }
-                    }
-                }
-                Err(e) => {
-                    warn!("âš ï¸ Preferred system audio '{}' not available: {}", pref_name, e);
-                    warn!("   Falling back to system default...");
-                    match default_output_device() {
-                        Ok(device) => {
-                            info!("âœ… Using default system audio: '{}'", device.name);
-                            Some(Arc::new(device))
-                        }
-                        Err(default_err) => {
-                            warn!("âš ï¸ No system audio available (preferred and default both failed): {}", default_err);
-                            warn!("   Recording will continue with microphone only");
-                            None // System audio is optional
+                    },
+                    Err(e) => {
+                        warn!(
+                            "âš ï¸ Preferred system audio '{}' not available: {}",
+                            pref_name, e
+                        );
+                        warn!("   Falling back to system default...");
+                        match default_output_device() {
+                            Ok(device) => {
+                                info!("âœ… Using default system audio: '{}'", device.name);
+                                Some(Arc::new(device))
+                            }
+                            Err(default_err) => {
+                                warn!("âš ï¸ No system audio available (preferred and default both failed): {}", default_err);
+                                warn!("   Recording will continue with microphone only");
+                                None // System audio is optional
+                            }
                         }
                     }
                 }
             }
-        }
-        None => {
-            info!("ðŸ”Š No system audio preference set, using system default");
-            match default_output_device() {
-                Ok(device) => {
-                    info!("âœ… Using default system audio: '{}'", device.name);
-                    Some(Arc::new(device))
-                }
-                Err(e) => {
-                    warn!("âš ï¸ No default system audio available: {}", e);
-                    warn!("   Recording will continue with microphone only");
-                    None // System audio is optional
+            None => {
+                info!("ðŸ”Š No system audio preference set, using system default");
+                match default_output_device() {
+                    Ok(device) => {
+                        info!("âœ… Using default system audio: '{}'", device.name);
+                        Some(Arc::new(device))
+                    }
+                    Err(e) => {
+                        warn!("âš ï¸ No default system audio available: {}", e);
+                        warn!("   Recording will continue with microphone only");
+                        None // System audio is optional
+                    }
                 }
             }
         }
@@ -464,9 +484,11 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         .map_err(|error| { crate::diarization::online::stop(); map_recording_start_error(&app, error) })?;
 
     #[cfg(target_os = "windows")]
-    if !per_app_enabled {
+    if !per_app_enabled && !manager.get_state().room_microphone() {
         start_windows_audio_route_monitor(&app, &manager, resolved_system_device_name);
     }
+
+    let room_microphone = manager.get_state().room_microphone();
 
     // Store the manager globally to keep it alive
     {
@@ -484,7 +506,11 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     reset_speech_detected_flag(); // Reset for new recording session
 
     // Start optimized parallel transcription task and store handle
-    let task_handle = transcription::start_transcription_task(app.clone(), transcription_receiver);
+    let task_handle = transcription::start_transcription_task(
+        app.clone(),
+        transcription_receiver,
+        room_microphone,
+    );
     {
         let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
         *global_task = Some(task_handle);
@@ -612,6 +638,24 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     }
     info!("âœ… Transcription model validation passed");
 
+    // Load recording preferences to check auto_save setting
+    let preferences = match super::recording_preferences::load_recording_preferences(&app).await {
+        Ok(prefs) => {
+            info!(
+                "ðŸ“‹ Loaded recording preferences: auto_save={}",
+                prefs.auto_save
+            );
+            prefs
+        }
+        Err(e) => {
+            warn!(
+                "Failed to load recording preferences, defaulting to auto_save=true: {}",
+                e
+            );
+            super::recording_preferences::RecordingPreferences::default()
+        }
+    };
+
     // Resolve devices against the current enumeration. A syntactically valid
     // persisted name can refer to hardware that has since disconnected.
     let mic_device = if let Some(ref name) = mic_device_name {
@@ -639,7 +683,9 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     };
 
     #[cfg(target_os = "macos")]
-    let system_device = {
+    let system_device = if preferences.room_microphone {
+        None
+    } else {
         if let Some(name) = system_device_name.as_ref() {
             warn!(
                 "Ignoring requested macOS output '{}'; Core Audio follows the current default route",
@@ -656,7 +702,9 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     };
 
     #[cfg(not(target_os = "macos"))]
-    let system_device = if let Some(ref name) = system_device_name {
+    let system_device = if preferences.room_microphone {
+        None
+    } else if let Some(ref name) = system_device_name {
         let preferred = parse_audio_device(name)
             .map_err(|e| format!("Invalid system device '{}': {}", name, e))?;
         match get_device_and_config(&preferred).await {
@@ -679,17 +727,9 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     // Create new recording manager
     let mut manager = RecordingManager::new();
 
-    // Load recording preferences to check auto_save setting
-    let preferences = match super::recording_preferences::load_recording_preferences(&app).await {
-        Ok(prefs) => {
-            info!("ðŸ“‹ Loaded recording preferences: auto_save={}", prefs.auto_save);
-            prefs
-        }
-        Err(e) => {
-            warn!("Failed to load recording preferences, defaulting to auto_save=true: {}", e);
-            super::recording_preferences::RecordingPreferences::default()
-        }
-    };
+    manager
+        .get_state()
+        .set_room_microphone(preferences.room_microphone);
     let auto_save = preferences.auto_save;
     manager.set_recordings_folder(preferences.save_folder);
     manager.set_per_app_config(
@@ -723,9 +763,11 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         .map_err(|error| { crate::diarization::online::stop(); map_recording_start_error(&app, error) })?;
 
     #[cfg(target_os = "windows")]
-    if !preferences.per_app_recording_enabled {
+    if !preferences.per_app_recording_enabled && !manager.get_state().room_microphone() {
         start_windows_audio_route_monitor(&app, &manager, resolved_system_device_name);
     }
+
+    let room_microphone = manager.get_state().room_microphone();
 
     // Store the manager globally to keep it alive
     {
@@ -743,7 +785,11 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     reset_speech_detected_flag(); // Reset for new recording session
 
     // Start optimized parallel transcription task and store handle
-    let task_handle = transcription::start_transcription_task(app.clone(), transcription_receiver);
+    let task_handle = transcription::start_transcription_task(
+        app.clone(),
+        transcription_receiver,
+        room_microphone,
+    );
     {
         let mut global_task = TRANSCRIPTION_TASK.lock().unwrap();
         *global_task = Some(task_handle);
@@ -1006,11 +1052,7 @@ async fn stop_recording_inner<R: Runtime>(
     // Determine which provider was used and unload the appropriate model (with timeout)
     let config = match tokio::time::timeout(
         tokio::time::Duration::from_secs(30), // 30 seconds max for DB operation
-        crate::api::api::api_get_transcript_config(
-            app.clone(),
-            app.clone().state(),
-            None,
-        )
+        crate::api::api::api_get_transcript_config(app.clone(), app.clone().state(), None),
     )
     .await
     {
@@ -1229,9 +1271,7 @@ async fn stop_recording_inner<R: Runtime>(
     };
 
     let audio_save_error = match (stream_stop_error, save_error) {
-        (Some(stream_error), Some(save_error)) => {
-            Some(format!("{}; {}", stream_error, save_error))
-        }
+        (Some(stream_error), Some(save_error)) => Some(format!("{}; {}", stream_error, save_error)),
         (Some(error), None) | (None, Some(error)) => Some(error),
         (None, None) => None,
     };
@@ -1565,18 +1605,20 @@ pub enum DeviceEventResponse {
 impl From<DeviceEvent> for DeviceEventResponse {
     fn from(event: DeviceEvent) -> Self {
         match event {
-            DeviceEvent::DeviceDisconnected { device_name, device_type } => {
-                DeviceEventResponse::DeviceDisconnected {
-                    device_name,
-                    device_type: format!("{:?}", device_type),
-                }
-            }
-            DeviceEvent::DeviceReconnected { device_name, device_type } => {
-                DeviceEventResponse::DeviceReconnected {
-                    device_name,
-                    device_type: format!("{:?}", device_type),
-                }
-            }
+            DeviceEvent::DeviceDisconnected {
+                device_name,
+                device_type,
+            } => DeviceEventResponse::DeviceDisconnected {
+                device_name,
+                device_type: format!("{:?}", device_type),
+            },
+            DeviceEvent::DeviceReconnected {
+                device_name,
+                device_type,
+            } => DeviceEventResponse::DeviceReconnected {
+                device_name,
+                device_type: format!("{:?}", device_type),
+            },
             DeviceEvent::DeviceListChanged => DeviceEventResponse::DeviceListChanged,
         }
     }
@@ -1623,12 +1665,12 @@ pub async fn get_reconnection_status() -> Result<ReconnectionStatus, String> {
 
     if let Some(manager) = manager_guard.as_ref() {
         let state = manager.get_state();
-        let disconnected_device = state.get_disconnected_device().map(|(device, device_type)| {
-            DisconnectedDeviceInfo {
+        let disconnected_device = state
+            .get_disconnected_device()
+            .map(|(device, device_type)| DisconnectedDeviceInfo {
                 name: device.name.clone(),
                 device_type: format!("{:?}", device_type),
-            }
-        });
+            });
 
         Ok(ReconnectionStatus {
             is_reconnecting: manager.is_reconnecting(),

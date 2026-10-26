@@ -35,3 +35,9 @@ existing meeting/transcript records, models and preferences were verified after
 the upgrade. The app was reopened without debugging flags. The correction is
 installed locally, not a published release; no live provider title-quality test
 was performed during this qualification.
+
+Calendar title choices also preserve explicit ownership. The optional
+`api_save_transcript.title_is_manual` field flows into the native meeting/transcript
+transaction, so a chosen calendar title cannot be overwritten by a summary even
+when its text looks like a generic default. Old callers retain inferred ownership.
+See [CALENDAR_MEETING_SUGGESTIONS.md](CALENDAR_MEETING_SUGGESTIONS.md).

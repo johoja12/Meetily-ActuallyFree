@@ -82,9 +82,9 @@ export function writeLiveNotes(notes: { markdown: string; json: unknown[] | null
 }
 
 /** A new recording starts with its automatic title and an empty page. */
-export function beginLiveSession(title: string, startedAt: number) {
+export function beginLiveSession(title: string, startedAt: number, manual = false) {
   writeLiveNotes(null);
-  writeLiveTitle({ title, manual: false, startedAt });
+  writeLiveTitle({ title, manual, startedAt });
 }
 
 export function endLiveSession() {

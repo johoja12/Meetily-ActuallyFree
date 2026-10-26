@@ -391,6 +391,7 @@ export function PostCallProcessingWorker({
   return (
     <PostCallHandoffCard
       centered
+      placement={isWorking ? 'top-left' : 'dock'}
       busy={isWorking}
       onDismiss={!isWorking ? () => { void continueWithLiveTranscript(); } : undefined}
       title={
@@ -412,18 +413,20 @@ export function PostCallProcessingWorker({
     >
       {isWorking ? (
         <div className="space-y-2">
-        <Link href={`/meeting-details?id=${encodeURIComponent(meetingId)}`} className="text-xs text-af-accent underline">Open this meeting</Link>
-        <div className="h-1.5 overflow-hidden rounded-full bg-af-border">
-          <div
-            className="h-full rounded-full bg-af-accent transition-[width] duration-300"
-            style={{ width: `${visibleProgress}%` }}
-          />
-        </div>
-        <Button variant="ghost" disabled={cancelling} onClick={() => {
-          setCancelling(true);
-          cancellation.current.abort();
-          setMessage('Cancelling after the current native operation finishes…');
-        }}>{cancelling ? 'Cancelling…' : 'Cancel processing'}</Button>
+          <div className="flex items-center justify-between gap-2">
+            <Link href={`/meeting-details?id=${encodeURIComponent(meetingId)}`} className="text-xs text-af-accent underline">Open this meeting</Link>
+            <Button variant="ghost" size="xs" aria-label="Cancel processing" disabled={cancelling} onClick={() => {
+              setCancelling(true);
+              cancellation.current.abort();
+              setMessage('Cancelling after the current native operation finishes…');
+            }}>{cancelling ? 'Cancelling…' : 'Cancel'}</Button>
+          </div>
+          <div className="h-1 overflow-hidden rounded-full bg-af-border">
+            <div
+              className="h-full rounded-full bg-af-accent transition-[width] duration-300"
+              style={{ width: `${visibleProgress}%` }}
+            />
+          </div>
         </div>
       ) : (
         <div className="space-y-3">

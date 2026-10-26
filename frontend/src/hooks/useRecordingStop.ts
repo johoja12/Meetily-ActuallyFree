@@ -13,7 +13,7 @@ import {
   applyPinnedSummaryLanguageToMeeting,
   detectAndCacheSummaryLanguage,
 } from '@/lib/summary-language-preferences';
-import { endLiveSession, finalLiveTitle, readLiveNotes, writeLiveTitle } from '@/lib/live-session';
+import { endLiveSession, finalLiveTitle, readLiveTitle, readLiveNotes, writeLiveTitle } from '@/lib/live-session';
 import { announceChange, saveMeetingNotes } from '@/lib/workspace-api';
 import { endAutomatedRecording } from '@/lib/meeting-automation';
 
@@ -270,7 +270,8 @@ export function useRecordingStop(
             meetingName,
             freshTranscripts,
             folderPath,
-            recordingStartedAt
+            recordingStartedAt,
+            readLiveTitle()?.manual || undefined
           );
 
           const meetingId = responseData.meeting_id;

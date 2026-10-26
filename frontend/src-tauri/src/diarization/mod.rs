@@ -17,12 +17,12 @@
 pub mod clustering;
 pub mod download;
 pub mod dsp;
+pub mod live_nemotron;
 pub mod models;
 pub mod nemotron;
 pub mod online;
-pub mod live_nemotron;
-pub mod voiceprint;
 pub mod voice_profiles;
+pub mod voiceprint;
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -486,7 +486,11 @@ pub fn diarize_file_with_models(
             });
         }
     }
-    segments.sort_by(|a, b| a.start.partial_cmp(&b.start).unwrap_or(std::cmp::Ordering::Equal));
+    segments.sort_by(|a, b| {
+        a.start
+            .partial_cmp(&b.start)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let mut merged: Vec<DiarizationSegment> = Vec::with_capacity(segments.len());
     for seg in segments {
@@ -706,9 +710,9 @@ pub async fn download_diarization_models<R: tauri::Runtime>(
     // Finish the opt-in download in the native task. A WebView reload during
     // setup must not discard the preference save along with its JS callback.
     if target == "nemotron" {
-        set_diarization_engine(target).await.map_err(|e| {
-            format!("Model downloaded, but could not enable it: {e}")
-        })?;
+        set_diarization_engine(target)
+            .await
+            .map_err(|e| format!("Model downloaded, but could not enable it: {e}"))?;
         use tauri::Emitter;
         let _ = app.emit("diarization-engine-changed", "nemotron");
     }
@@ -790,13 +794,15 @@ pub async fn diarize_recording(
     let selected_engine = engine.unwrap_or_else(get_active_engine);
     if !matches!(selected_engine.as_str(), "pyannote" | "nemotron") { return Err("Unknown diarization engine".into()); }
     // Model inference is CPU-heavy; keep it off the async runtime's core threads.
-    tokio::task::spawn_blocking(move || diarize_file_with_engine(&path, &selected_engine, num_speakers, threshold))
-        .await
-        .map_err(|e| format!("Diarization task failed: {}", e))?
-        .map_err(|e| {
-            log::error!("Diarization failed: {}", e);
-            e.to_string()
-        })
+    tokio::task::spawn_blocking(move || {
+        diarize_file_with_engine(&path, &selected_engine, num_speakers, threshold)
+    })
+    .await
+    .map_err(|e| format!("Diarization task failed: {}", e))?
+    .map_err(|e| {
+        log::error!("Diarization failed: {}", e);
+        e.to_string()
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -899,7 +905,7 @@ fn is_manual_speaker_label(label: &str) -> bool {
     }
     let is_generated = trimmed.split(" + ").all(|part| {
         let p = part.trim();
-        p.eq_ignore_ascii_case("guest")
+        (p.eq_ignore_ascii_case("guest") || p.eq_ignore_ascii_case("room"))
             || p.eq_ignore_ascii_case("you")
             || p.eq_ignore_ascii_case("unknown")
             || (p.to_ascii_lowercase().starts_with("speaker ")
@@ -917,7 +923,7 @@ fn extract_manual_speaker_names(label: &str) -> Vec<String> {
     for part in trimmed.split(" + ") {
         let p = part.trim();
         if !p.is_empty()
-            && !p.eq_ignore_ascii_case("guest")
+            && !(p.eq_ignore_ascii_case("guest") || p.eq_ignore_ascii_case("room"))
             && !p.eq_ignore_ascii_case("you")
             && !p.eq_ignore_ascii_case("unknown")
             && !(p.to_ascii_lowercase().starts_with("speaker ")
@@ -1033,7 +1039,7 @@ pub async fn diarize_meeting(
         let system_source = parent.as_ref().map(|p| p.join("system.mp4"));
 
         if let (Some(mic), Some(system)) = (mic_source, system_source) {
-            if mic.exists() && system.exists() {
+            if !crate::audio::recording_saver::is_room_microphone_recording(source.parent().unwrap_or(Path::new(""))) && mic.exists() && system.exists() {
                 log::info!(
                     "Using separate diarization tracks: mic={} system={}",
                     mic.display(),
@@ -1379,7 +1385,7 @@ pub async fn diarize_meeting(
             let live_trim = live.trim();
             if !live_trim.is_empty() {
                 let is_generated = live_trim.split(" + ").all(|part| {
-                    part.eq_ignore_ascii_case("guest")
+                    (part.eq_ignore_ascii_case("guest") || part.eq_ignore_ascii_case("room"))
                         || part.eq_ignore_ascii_case("you")
                         || part.to_ascii_lowercase().starts_with("speaker ")
                 });

@@ -1,20 +1,20 @@
-use std::sync::Arc;
-use tokio::sync::mpsc;
 use anyhow::Result;
 use log::{debug, error, info, warn};
+use std::sync::Arc;
+use tokio::sync::mpsc;
 
-use super::devices::{AudioDevice, list_audio_devices};
+use super::devices::{list_audio_devices, AudioDevice};
 
 #[cfg(target_os = "macos")]
 use super::devices::get_safe_recording_devices_macos;
 
+use super::device_monitor::{AudioDeviceMonitor, DeviceEvent, DeviceMonitorType};
 #[cfg(not(target_os = "macos"))]
 use super::devices::{default_input_device, default_output_device};
-use super::recording_state::{RecordingState, AudioChunk, DeviceType as RecordingDeviceType};
 use super::pipeline::AudioPipelineManager;
-use super::stream::AudioStreamManager;
 use super::recording_saver::RecordingSaver;
-use super::device_monitor::{AudioDeviceMonitor, DeviceEvent, DeviceMonitorType};
+use super::recording_state::{AudioChunk, DeviceType as RecordingDeviceType, RecordingState};
+use super::stream::AudioStreamManager;
 
 /// Stream manager type enumeration
 pub enum StreamManagerType {
@@ -72,6 +72,22 @@ impl RecordingManager {
         level_sender: Option<mpsc::UnboundedSender<super::pipeline::AudioLevels>>,
     ) -> Result<mpsc::UnboundedReceiver<AudioChunk>> {
         info!("Starting recording manager (auto_save: {})", auto_save);
+        // Room audio already contains both sides. Do not open system/per-app
+        // capture, which would duplicate voices and contaminate the one timeline.
+        let system_device = if self.state.room_microphone() {
+            if microphone_device.is_none() {
+                return Err(anyhow::anyhow!(
+                    "Room microphone mode requires a microphone"
+                ));
+            }
+            self.per_app_enabled = false;
+            None
+        } else {
+            system_device
+        };
+
+        self.recording_saver
+            .set_room_microphone(self.state.room_microphone());
 
         // Set up transcription channel
         let (transcription_sender, transcription_receiver) = mpsc::unbounded_channel::<AudioChunk>();
@@ -127,7 +143,7 @@ impl RecordingManager {
         }
         self.recording_saver.set_device_info(
             microphone_device.as_ref().map(|d| d.name.clone()),
-            Some(sys_name)
+            Some(sys_name),
         );
 
         // Give the pipeline a moment to fully initialize before starting streams
