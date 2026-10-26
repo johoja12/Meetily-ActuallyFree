@@ -1390,7 +1390,7 @@ pub(crate) fn is_person_name(name: &str) -> bool {
     if trimmed.is_empty()
         || matches!(
             lower.as_str(),
-            "you" | "guest" | "mic" | "microphone" | "system" | "system audio" | "speaker"
+            "you" | "guest" | "room" | "mic" | "microphone" | "system" | "system audio" | "speaker"
         )
         || lower.starts_with("speaker ")
         || trimmed.contains(" + ")
@@ -1415,10 +1415,11 @@ async fn next_available_speaker_label(
 
     for index in 1_u64.. {
         let candidate = format!("Speaker {}", index);
-        if !labels
-            .iter()
-            .any(|label| speaker_components(label).iter().any(|part| part.eq_ignore_ascii_case(&candidate)))
-        {
+        if !labels.iter().any(|label| {
+            speaker_components(label)
+                .iter()
+                .any(|part| part.eq_ignore_ascii_case(&candidate))
+        }) {
             return Ok(candidate);
         }
     }
@@ -2272,12 +2273,15 @@ mod tests {
         PeopleRepository::rename_meeting_speaker(&pool, "m2", "Thomas Becker", "Tom").await.unwrap();
         assert_eq!(person_link_count(&pool, "p-tom").await, 1);
         assert_eq!(person_link_count(&pool, "p-thomas").await, 0);
-        let thomas: String = sqlx::query_scalar("SELECT display_name FROM people WHERE id = 'p-thomas'")
-            .fetch_one(&pool)
+        let thomas: String =
+            sqlx::query_scalar("SELECT display_name FROM people WHERE id = 'p-thomas'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(thomas, "Thomas Becker");
+        PeopleRepository::rename_meeting_speaker(&pool, "m2", "Tom", "Thomas Becker")
             .await
             .unwrap();
-        assert_eq!(thomas, "Thomas Becker");
-        PeopleRepository::rename_meeting_speaker(&pool, "m2", "Tom", "Thomas Becker").await.unwrap();
         assert_eq!(person_link_count(&pool, "p-thomas").await, 1);
         assert_eq!(person_link_count(&pool, "p-tom").await, 0);
 

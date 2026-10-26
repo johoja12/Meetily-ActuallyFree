@@ -44,6 +44,7 @@ import { formatDuration, parseDate } from '@/lib/dates';
 import { timeRange } from '@/lib/meeting-titles';
 import { useUserName } from '@/hooks/useUserName';
 import { isUserSpeaker, speakerKey } from '@/utils/speakerUtils';
+import { SavedCalendarTitleSuggestions } from '@/components/calendar/SavedCalendarTitleSuggestions';
 import { useDiarizationEngine } from '@/hooks/useDiarizationEngine';
 
 const isGenericSpeaker = (label: string) => /^speaker d+$/i.test(label.trim()) || /^guest$/i.test(label.trim());
@@ -151,6 +152,7 @@ export function MeetingHeader({
           <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-af-text-3">
             {when && <span className="tabular-nums">{when}</span>}
             {durationSeconds ? <span className="tabular-nums">{formatDuration(durationSeconds)}</span> : null}
+            <SavedCalendarTitleSuggestions meetingId={meetingId} onRename={onRename} />
             <GroupPicker value={groupId} onChange={onGroupChange} placeholder="Add to group" />
           </div>
           {uniquePeople.length > 0 && (

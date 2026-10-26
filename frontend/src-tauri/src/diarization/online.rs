@@ -100,7 +100,7 @@ pub fn is_active() -> bool {
 }
 
 /// Begin a live session with the selected engine, fixed for this recording.
-/// Nemotron receives continuous system audio from the pipeline; Pyannote uses
+/// Nemotron receives continuous system (or room microphone) audio; Pyannote uses
 /// the existing per-turn embedding path. Neither silently switches engines.
 ///
 /// Safe to call when models are absent — it simply reports failure and the

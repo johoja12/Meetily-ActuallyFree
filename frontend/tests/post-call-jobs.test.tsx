@@ -48,7 +48,7 @@ test('navigation retains work; completion refreshes only its meeting on return',
   await act(async () => button('Auto-detect & continue').props.onClick());
   expect(calls.filter(([name]) => name === 'start_retranscription_command')).toHaveLength(1);
   await act(async () => root.update(<App page="b" enabled={false} />));
-  expect(button('Cancel processing')).toBeDefined();
+  expect(button('Cancel')).toBeDefined();
   await act(async () => events.get('retranscription-complete')!({ payload: { meeting_id: 'a' } }));
   expect(refreshA).not.toHaveBeenCalled();
   expect(refreshB).not.toHaveBeenCalled();
@@ -87,7 +87,7 @@ test('returning to an active meeting does not reopen or duplicate its job', asyn
 test('cancel targets the meeting and retains ownership until native completion', async () => {
   await act(async () => { root = create(<App />); });
   await act(async () => button('Auto-detect & continue').props.onClick());
-  await act(async () => button('Cancel processing').props.onClick());
+  await act(async () => button('Cancel').props.onClick());
   expect(calls.find(([name]) => name === 'cancel_retranscription_command')?.[1]).toEqual({ meetingId: 'a' });
   expect(button('Cancelling…').props.disabled).toBe(true);
   expect(completeA).not.toHaveBeenCalled();

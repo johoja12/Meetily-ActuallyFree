@@ -453,13 +453,16 @@ pub async fn api_get_meeting_audio<R: Runtime>(
         mic_path: None,
         system_path: None,
     };
-    let folder: Option<String> = sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
-        .bind(&meeting_id)
-        .fetch_optional(state.db_manager.pool())
-        .await
-        .map_err(|e| format!("Failed to look up the meeting folder: {}", e))?
-        .flatten();
-    let Some(folder) = folder else { return Ok(none) };
+    let folder: Option<String> =
+        sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
+            .bind(&meeting_id)
+            .fetch_optional(state.db_manager.pool())
+            .await
+            .map_err(|e| format!("Failed to look up the meeting folder: {}", e))?
+            .flatten();
+    let Some(folder) = folder else {
+        return Ok(none);
+    };
     let dir = std::path::PathBuf::from(folder);
     if !dir.is_dir() {
         return Ok(none);
@@ -470,18 +473,25 @@ pub async fn api_get_meeting_audio<R: Runtime>(
         path.is_file().then(|| path.to_string_lossy().to_string())
     };
     let playback = existing("audio.mp4").or_else(|| {
-        std::fs::read_dir(&dir).ok().and_then(|entries| {
-            entries.filter_map(Result::ok).map(|entry| entry.path()).find(|path| {
-                path.is_file()
-                    && path.file_stem().and_then(|stem| stem.to_str()) == Some("audio")
-                    && path
-                        .extension()
-                        .and_then(|ext| ext.to_str())
-                        .map(|ext| PLAYABLE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()))
-                        .unwrap_or(false)
+        std::fs::read_dir(&dir)
+            .ok()
+            .and_then(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .find(|path| {
+                        path.is_file()
+                            && path.file_stem().and_then(|stem| stem.to_str()) == Some("audio")
+                            && path
+                                .extension()
+                                .and_then(|ext| ext.to_str())
+                                .map(|ext| {
+                                    PLAYABLE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())
+                                })
+                                .unwrap_or(false)
+                    })
             })
-        })
-        .map(|path| path.to_string_lossy().to_string())
+            .map(|path| path.to_string_lossy().to_string())
     });
     let audio = MeetingAudio {
         path: playback,
@@ -1189,6 +1199,7 @@ pub async fn api_save_transcript<R: Runtime>(
     transcripts: Vec<serde_json::Value>,
     folder_path: Option<String>,
     recording_started_at: Option<String>,
+    title_is_manual: Option<bool>,
     auth_token: Option<String>,
 ) -> Result<serde_json::Value, String> {
     log_info!(
@@ -1255,6 +1266,7 @@ pub async fn api_save_transcript<R: Runtime>(
         &transcripts_to_save,
         folder_path,
         recording_started_at,
+        title_is_manual,
     )
     .await
     {

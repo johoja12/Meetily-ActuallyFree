@@ -84,6 +84,9 @@ pub struct PerAppTarget {
 pub struct RecordingPreferences {
     pub save_folder: PathBuf,
     pub auto_save: bool,
+    /// Microphone contains the whole room/call, not an authoritative local identity.
+    #[serde(default)]
+    pub room_microphone: bool,
     pub file_format: String,
     #[serde(default)]
     pub preferred_mic_device: Option<String>,
@@ -125,6 +128,7 @@ impl Default for RecordingPreferences {
         Self {
             save_folder: get_default_recordings_folder(),
             auto_save: true,
+            room_microphone: false,
             file_format: "mp4".to_string(),
             preferred_mic_device: None,
             preferred_system_device: None,
@@ -736,6 +740,15 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn room_microphone_preference_round_trips() {
+        let mut preferences = RecordingPreferences::default();
+        preferences.room_microphone = true;
+        let restored: RecordingPreferences =
+            serde_json::from_value(serde_json::to_value(preferences).unwrap()).unwrap();
+        assert!(restored.room_microphone);
+    }
+
+    #[test]
     fn old_preferences_default_system_gain_to_unity() {
         let preferences: RecordingPreferences = serde_json::from_value(serde_json::json!({
             "save_folder": "recordings",
@@ -745,6 +758,7 @@ mod tests {
         }))
         .expect("legacy preferences should deserialize");
 
+        assert!(!preferences.room_microphone);
         assert_eq!(preferences.system_gain, 1.0);
         assert!(!preferences.real_time_transcription);
     }

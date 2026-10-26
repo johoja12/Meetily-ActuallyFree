@@ -123,3 +123,14 @@ test('a silent probe with a stale status keeps the banner', async () => {
   await act(async () => { await current.requestPermissions(); });
   expect(current.hasSystemAudio).toBe(false);
 });
+
+
+test('room microphone permission recheck does not open a system audio tap or prompt', async () => {
+  permission = 'denied';
+  await mount();
+  calls.length = 0;
+  await act(async () => { await current.requestPermissions(false); });
+  expect(calls).toContain('trigger_microphone_permission');
+  expect(calls).not.toContain('trigger_system_audio_permission_command');
+  expect(current.hasSystemAudio).toBe(false);
+});

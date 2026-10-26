@@ -17,6 +17,8 @@
  *    (minibar::stop_recording_from_minibar).
  */
 
+import { useRoomMicrophone } from '@/hooks/useRoomMicrophone';
+import { RoomMicrophoneSetting } from '@/components/recording/RoomMicrophoneSetting';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -104,6 +106,8 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   const activeDevices = savedDevices ?? selectedDevices;
   const isMacOS = usePlatform() === 'macos';
   // All computer audio, or only chosen apps (Settings > Recording has it too).
+  const saveChain = useRef(Promise.resolve());
+  const room = useRoomMicrophone(saveChain);
   const appAudio = useAppAudio();
   const appAudioSupported = useAppAudioSupported();
   const onlyChosenApps = appAudioSupported && appAudio.onlyApps && appAudio.targets.length > 0;
@@ -111,7 +115,6 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
   const [openLane, setOpenLane] = useState<'mic' | 'output' | null>(null);
   const [micGain, setMicGain] = useState(1);
   const [systemGain, setSystemGain] = useState(1);
-  const saveChain = useRef(Promise.resolve());
   const gainTimer = useRef<number | null>(null);
   const pendingGain = useRef<{ which: 'mic' | 'system'; value: number } | null>(null);
   // Mutes chosen before recording apply the moment it starts.
@@ -416,7 +419,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
     };
   }, [onRecordingStop, onTranscriptionError]);
 
-  const busy = isStarting || isProcessing;
+  const busy = isStarting || isProcessing || room.saving || room.loading;
   const elapsed = formatClock(recordingState.activeDuration ?? recordingState.recordingDuration ?? 0);
 
   return (
@@ -442,7 +445,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
               }}
               disabled={
                 busy ||
-                (!isRecording && isRecordingDisabled) ||
+                (!isRecording && (isRecordingDisabled || room.loadError)) ||
                 (isRecording && (isStopping || isPausing || isResuming))
               }
               aria-label={isRecording ? 'Stop recording' : 'Start recording'}
@@ -528,9 +531,11 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
 
         <div className="h-8 w-px shrink-0 self-center bg-af-border" />
 
+        {room.enabled && <span className="shrink-0 text-xs font-medium text-af-text-2">Room microphone</span>}
         <div className={cn('flex items-center gap-2', isRecording ? 'min-w-0 flex-1' : 'shrink-0')}>
           <RecordingVoiceLane
             kind="mic"
+            source={<RoomMicrophoneSetting enabled={room.enabled} disabled={isRecording || busy} onChange={(enabled) => { void room.update(enabled); }} />}
             open={openLane === 'mic'}
             onOpenChange={(next) => {
               if (next) void loadAudioDevices();
@@ -551,7 +556,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
               else setIdleMicMuted((current) => !current);
             }}
           />
-          <RecordingVoiceLane
+          {!room.enabled && <RecordingVoiceLane
             kind="output"
             open={openLane === 'output'}
             onOpenChange={(next) => {
@@ -561,7 +566,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
             savedValue={isMacOS ? null : activeDevices?.systemDevice ?? null}
             options={isMacOS ? [] : outputDevices}
             onSelect={chooseSystem}
-            disabled={isStarting}
+            disabled={isStarting || room.saving}
             gain={systemGain}
             onGainLive={(value) => scheduleGain('system', value, false)}
             onGainCommit={(value) => scheduleGain('system', value, true)}
@@ -575,7 +580,7 @@ export const RecordingControls: React.FC<RecordingControlsProps> = ({
               if (isRecording) void handleSystemAudioMute();
               else setIdleSystemMuted((current) => !current);
             }}
-          />
+          />}
         </div>
       </div>
     </div>

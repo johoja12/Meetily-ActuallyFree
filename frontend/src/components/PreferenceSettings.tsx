@@ -203,9 +203,8 @@ export function PreferenceSettings() {
       <div className="rounded-2xl border border-af-border bg-af-panel-2/40 p-5">
         <h3 className="text-[15px] font-semibold text-af-text mb-2">Your Name</h3>
         <p className="text-sm text-af-text-2 mb-3">
-          Labels your microphone in transcripts as <strong>You ({userName || 'Name'})</strong>. Your audio is
-          always tagged as you; other participants are labelled separately (&quot;Guest&quot;, and Speaker 1/2/3 once
-          voice diarization is enabled).
+          In personal microphone mode, labels your voice as <strong>You ({userName || 'Name'})</strong>.
+          Room microphone mode identifies voices separately because the microphone can hear several people.
         </p>
         <input
           type="text"

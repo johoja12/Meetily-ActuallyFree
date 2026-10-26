@@ -3,12 +3,12 @@
 //! channel numbers are never treated as durable identities.
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use sqlx::SqlitePool;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
 use std::sync::Mutex;
-use std::collections::HashMap;
-use sqlx::SqlitePool;
+use std::sync::OnceLock;
 
 use super::models::DiarizationModels;
 
@@ -190,9 +190,14 @@ pub fn match_offline_speakers(track: &Path, segments: &[super::DiarizationSegmen
         let duration = segment.end - segment.start;
         // Cross-track overlap with the local mic does not contaminate the
         // separate system file. Only another remote channel makes it unsafe.
-        let remote_overlap = segments.iter().any(|other| other.speaker != segment.speaker
-            && other.start < segment.end && other.end > segment.start);
-        if remote_overlap || !(2.0..=15.0).contains(&duration) { continue; }
+        let remote_overlap = segments.iter().any(|other| {
+            other.speaker != segment.speaker
+                && other.start < segment.end
+                && other.end > segment.start
+        });
+        if remote_overlap || !(2.0..=15.0).contains(&duration) {
+            continue;
+        }
         let entries = vectors.entry(segment.speaker).or_default();
         if entries.len() >= MATCH_TURNS { continue; }
         let first = (segment.start * 16_000.0) as usize;
@@ -293,8 +298,11 @@ fn similarity(a: &[f32], b: &[f32]) -> Option<f32> {
 }
 
 pub fn best_match<'a>(embedding: &[f32], profiles: &'a [VoiceProfile]) -> Option<&'a VoiceProfile> {
-    let mut ranked: Vec<(f32, &VoiceProfile)> = profiles.iter()
-        .filter_map(|profile| similarity(embedding, &profile.embedding).map(|score| (score, profile)))
+    let mut ranked: Vec<(f32, &VoiceProfile)> = profiles
+        .iter()
+        .filter_map(|profile| {
+            similarity(embedding, &profile.embedding).map(|score| (score, profile))
+        })
         .collect();
     ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
     let (score, profile) = *ranked.first()?;
@@ -380,7 +388,14 @@ async fn meeting_share(
     let folder: Option<String> = sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
         .bind(meeting_id).fetch_optional(pool).await.map_err(failed)?.flatten();
     let folder = folder.ok_or_else(|| Meeting("This meeting has no saved audio.".into()))?;
-    let track = PathBuf::from(folder).join("system.mp4");
+    let folder = PathBuf::from(folder);
+    let track = folder.join(
+        if crate::audio::recording_saver::is_room_microphone_recording(&folder) {
+            "mic.mp4"
+        } else {
+            "system.mp4"
+        },
+    );
     if !track.is_file() {
         return Err(Meeting(
             "This meeting has no separate call audio to learn from. Recordings made with Save audio on keep it; imported files do not.".into(),
@@ -394,13 +409,25 @@ async fn meeting_share(
         .collect();
     let clear: Vec<(f64, f64)> = rows.iter().filter(|(label, _, _)| label == speaker)
         .filter_map(|(_, start, end)| Some((start.as_ref()?.to_owned(), end.as_ref()?.to_owned())))
-        .filter(|(start, end)| start.is_finite() && end.is_finite() && *start >= 0.0 && end - start >= 2.0 && end - start <= 15.0)
-        .filter(|(start, end)| !others.iter().any(|(other_start, other_end)| other_start < end && other_end > start))
+        .filter(|(start, end)| {
+            start.is_finite()
+                && end.is_finite()
+                && *start >= 0.0
+                && end - start >= 2.0
+                && end - start <= 15.0
+        })
+        .filter(|(start, end)| {
+            !others
+                .iter()
+                .any(|(other_start, other_end)| other_start < end && other_end > start)
+        })
         .collect();
     let turns = spread(&clear, LEARN_TURNS);
-    let no_clear_turn = || Meeting(format!(
+    let no_clear_turn = || {
+        Meeting(format!(
         "{name} has no clear turn of 2 to 15 seconds, with nobody talking over them, in this meeting."
-    ));
+    ))
+    };
     if turns.is_empty() {
         return Err(no_clear_turn());
     }

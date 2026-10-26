@@ -37,6 +37,7 @@ import { RouteWarmup } from '@/components/RouteWarmup'
 import { CHROME_BOOT_SCRIPT } from '@/lib/window-chrome'
 import { RecordingPill } from '@/components/recording/RecordingPill'
 import { GroupEditorHost } from '@/components/groups/GroupEditor'
+import { CalendarRecordingPrompts } from '@/components/calendar/CalendarRecordingPrompts'
 import { RecordingNotice } from '@/components/RecordingNotice'
 
 // Development only: in a plain browser (no Tauri bridge) serve sample data so
@@ -538,6 +539,7 @@ export default function RootLayout({
                                     <Sidebar />
                                     <MainContent>{children}</MainContent>
                                     <RecordingPill />
+                                    <CalendarRecordingPrompts enabled={recordingNoticeAcknowledged && onboardingCompleted} onStart={() => startRecordingAnywhere.current()} />
                                     <GroupEditorHost />
                                     <RecordingNotice onAcknowledged={acknowledgeRecordingNotice} />
                                   </div>

@@ -188,7 +188,9 @@ impl AudioMixerRingBuffer {
         // from the queued-lead budget before padding a missing source.
         const CALLBACK_GAP_SECONDS: f64 = 0.100;
         let mut chunk_start = match clock {
-            Some(clock) if start - clock.last_callback_end_seconds <= CALLBACK_GAP_SECONDS => clock.next_sample,
+            Some(clock) if start - clock.last_callback_end_seconds <= CALLBACK_GAP_SECONDS => {
+                clock.next_sample
+            }
             _ => wall_start,
         };
         let current_len = match device_type {
@@ -1185,13 +1187,14 @@ impl AudioPipeline {
         device_type: DeviceType,
         transcription_sender: &mpsc::UnboundedSender<AudioChunk>,
         chunk_id_counter: &mut u64,
+        room_microphone: bool,
     ) {
         // Dynamically adjust max speech duration if preference changed during recording
         let is_realtime = crate::audio::recording_preferences::is_real_time_transcription();
         vad.set_max_speech_duration_ms(if is_realtime { 3500 } else { 6000 });
 
         match vad.process_audio_observed(samples, |start, audio| {
-            if matches!(device_type, DeviceType::System) {
+            if device_type.feeds_diarization(room_microphone) {
                 crate::diarization::live_nemotron::feed(start, audio);
             }
         }) {
@@ -1407,6 +1410,7 @@ impl AudioPipeline {
                                 DeviceType::Microphone,
                                 &self.transcription_sender,
                                 &mut self.chunk_id_counter,
+                                self.state.room_microphone(),
                             );
                             Self::emit_source_speech(
                                 &mut self.system_vad,
@@ -1414,10 +1418,11 @@ impl AudioPipeline {
                                 DeviceType::System,
                                 &self.transcription_sender,
                                 &mut self.chunk_id_counter,
+                                self.state.room_microphone(),
                             );
 
                             // STEP 4: Persist three tracks for offline diarization + playback.
-                            //   mic.mp4     → local user ("You")
+                            //   mic.mp4     → microphone (multi-speaker in room mode)
                             //   system.mp4  → remote / computer audio
                             //   audio.mp4   → mixed playback (ducked)
                             if let Some(ref sender) = self.recording_sender_for_mixed {
@@ -1488,6 +1493,7 @@ impl AudioPipeline {
                 DeviceType::Microphone,
                 &self.transcription_sender,
                 &mut self.chunk_id_counter,
+                self.state.room_microphone(),
             );
             Self::emit_source_speech(
                 &mut self.system_vad,
@@ -1495,6 +1501,7 @@ impl AudioPipeline {
                 DeviceType::System,
                 &self.transcription_sender,
                 &mut self.chunk_id_counter,
+                self.state.room_microphone(),
             );
 
             if let Some(sender) = &self.recording_sender_for_mixed {
@@ -1595,7 +1602,9 @@ impl AudioPipelineManager {
         system_device_kind: super::device_detection::InputDeviceKind,
         level_sender: Option<mpsc::UnboundedSender<AudioLevels>>,
     ) -> Result<()>
-    where F: FnOnce() -> Result<mpsc::UnboundedSender<AudioChunk>> {
+    where
+        F: FnOnce() -> Result<mpsc::UnboundedSender<AudioChunk>>,
+    {
         // Log device information for adaptive buffering
         info!("🎙️ Starting pipeline with device info:");
         info!(

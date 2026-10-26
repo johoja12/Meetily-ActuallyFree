@@ -98,7 +98,7 @@ export function usePermissionCheck() {
     }
   };
 
-  const requestPermissions = () => {
+  const requestPermissions = (includeSystemAudio = true) => {
     // The native probe runs for up to five seconds; deduplicate Recheck clicks
     // so an older result cannot overwrite a newer permission attempt.
     if (requestInFlight.current) return requestInFlight.current;
@@ -107,7 +107,7 @@ export function usePermissionCheck() {
       setStatus(prev => ({ ...prev, isChecking: true, error: null }));
       try {
         await invoke('trigger_microphone_permission');
-        if (platform === 'macos') {
+        if (platform === 'macos' && includeSystemAudio) {
           // Starting the tap also shows the macOS prompt when not yet asked.
           // Audible samples prove the grant before TCC's cached status catches up.
           const systemAudioDetected = await invoke<boolean>('trigger_system_audio_permission_command');

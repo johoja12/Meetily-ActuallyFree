@@ -12,6 +12,13 @@ fn main() {
         println!("cargo:rustc-link-lib=framework=AVFoundation");
         println!("cargo:rustc-link-lib=framework=Cocoa");
         println!("cargo:rustc-link-lib=framework=Foundation");
+        println!("cargo:rustc-link-lib=framework=EventKit");
+        println!("cargo:rerun-if-changed=src/calendar/macos.m");
+        cc::Build::new()
+            .file("src/calendar/macos.m")
+            .flag("-fobjc-arc")
+            .flag("-fblocks")
+            .compile("meetily_calendar");
 
         // Let the enhanced_macos crate handle its own Swift compilation
         // The swift-rs crate build will be handled in the enhanced_macos crate's build.rs

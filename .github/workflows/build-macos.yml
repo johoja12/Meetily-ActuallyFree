@@ -282,6 +282,7 @@ jobs:
           INFO_PLIST="$APP_PATH/Contents/Info.plist"
           test -n "$(/usr/libexec/PlistBuddy -c 'Print :NSMicrophoneUsageDescription' "$INFO_PLIST")"
           test -n "$(/usr/libexec/PlistBuddy -c 'Print :NSAudioCaptureUsageDescription' "$INFO_PLIST")"
+          test -n "$(/usr/libexec/PlistBuddy -c 'Print :NSCalendarsFullAccessUsageDescription' "$INFO_PLIST")"
           MINIMUM_VERSION=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$INFO_PLIST")
           test "$MINIMUM_VERSION" = "14.2"
 
@@ -293,7 +294,7 @@ jobs:
 
           with open(sys.argv[1], "rb") as entitlements_file:
               actual = plistlib.load(entitlements_file)
-          expected = {"com.apple.security.device.audio-input": True}
+          expected = {"com.apple.security.device.audio-input": True, "com.apple.security.personal-information.calendars": True}
           if actual != expected:
               raise SystemExit(f"Unexpected entitlements: {actual!r}")
           PY

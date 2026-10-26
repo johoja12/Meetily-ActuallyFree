@@ -10,13 +10,18 @@ release availability and qualification are separate facts documented below.
 | --- | --- | --- |
 | Transcription | Parakeet, Whisper, or configured provider | Produces words and transcript timing. |
 | Diarization | Selected Pyannote/WeSpeaker or Nemotron engine | Assigns meeting-local speaker labels to audio/transcript turns. |
-| Capture provenance | Independent microphone/system tracks | Establishes the local `You` label; it is not inferred from speaker channel 0. |
+| Capture provenance | Independent microphone/system tracks | Establishes `You` for personal microphone capture; room mode diarizes the mic. |
 
 Nemotron is diarization, not voice isolation. Its overlapping activity predictions
 do not produce separate audio tracks for each remote voice. Names, voiceprints,
 and a model's anonymous speaker channels are also different concepts.
 
 ## 2. Recording data flow
+
+[ROOM_MICROPHONE.md](ROOM_MICROPHONE.md) documents acoustic room capture, its
+persisted session mode, microphone diarization, and post-call provenance rules.
+In that opt-in mode the microphone is multi-speaker audio, so it does not
+establish `You`; computer/per-app capture is excluded for the session.
 
 Speech-start pre-roll, live system speech sensitivity, and real-call replay
 qualification are documented in [LIVE_SPEECH_RETENTION.md](LIVE_SPEECH_RETENTION.md).
@@ -105,11 +110,11 @@ recording_commands.rs: start command
         -> separate VAD processors for microphone and system
            -> vad.rs: resample to 16 kHz
               -> continuous observer BEFORE silence removal
-                 -> system only: live_nemotron::feed(recording_sample, audio)
+                 -> system (room mode: mic): live_nemotron::feed(recording_sample, audio)
               -> VAD speech turns -> transcription queue
         -> persist mic/system source tracks and mixed playback audio
      -> transcription/worker.rs: transcribe each source's speech turn
-        -> microphone: You
+        -> personal microphone: You; room microphone: selected diarizer
         -> Pyannote selected: online embedding/centroid speaker matching
         -> Nemotron selected: query streaming timeline by turn start + duration
         -> transcript-update event
@@ -146,8 +151,9 @@ Paths below are relative to `frontend/src-tauri/src/` unless marked frontend.
   Ignoring that buffer causes timestamp drift between diarization and transcripts.
 - Preserve silence and timeline gaps. Concatenating VAD speech turns without
   their gaps is not a continuous recording and corrupts streaming timing.
-- Mic and system audio must not be mixed before source attribution. Microphone
-  audio retains `You`; remote model channels remain `Speaker N`.
+- Mic and system audio must not be mixed before source attribution. Personal
+  microphone audio retains `You`; room microphone audio and remote model channels
+  receive diarized labels without inferring identity from a channel number.
 - Speaker channels are meeting-local. The live model/cache is recreated for each
   recording. Changing settings during a call affects the next live session.
 - One transcript turn currently gets one greatest-overlap label. Do not split
@@ -172,6 +178,15 @@ The low-latency profile buffers 1.04 s of audio, emits 0.72 s strides, and uses
 VAD boundaries, ASR time, and queue load also contribute. Timeline lookup waits
 at most 1.5 s; history is limited to ten minutes. Missing/failed results retain
 source labels rather than guessing a speaker or switching engines.
+
+### Calendar titles and recording prompts
+
+[CALENDAR_MEETING_SUGGESTIONS.md](CALENDAR_MEETING_SUGGESTIONS.md) maps the opt-in
+macOS Calendar reader, native reminder scheduler, Settings > Calendar, idle/live
+title choices, saved-recording historical matches (`calendar/saved.rs` and
+`SavedCalendarTitleSuggestions` in the meeting header), privacy/permission boundary,
+and native title ownership on save. Historical reads never feed recording prompts.
+Calendar prompts require a user click; they never start or stop recording by time.
 
 ## 3. Post-call processing and model selection
 
@@ -304,6 +319,12 @@ Live system-meter warnings are documented in
 
 See [PR39_INTEGRATION.md](PR39_INTEGRATION.md) for capture-readiness, setup
 gating, quiet-speech and meeting-scoped speaker-edit recovery corrections.
+
+Post-call transcript progress (`PostCallHandoffCard` with `placement="top-left"`
+from `PostCallProcessingWorker`) uses a compact 320px corner card, separate from
+the bottom recording dock. Open meeting, progress and cancellation remain
+available; speaker choices and errors retain their existing modal behavior.
+The existing isolated post-call jobs tests cover native cancellation ownership.
 
 ### Home meeting library
 

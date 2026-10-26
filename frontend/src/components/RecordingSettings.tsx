@@ -1,3 +1,6 @@
+import { useRoomMicrophone } from '@/hooks/useRoomMicrophone';
+import { RoomMicrophoneSetting } from '@/components/recording/RoomMicrophoneSetting';
+import { RecordingStatus, useRecordingState } from '@/contexts/RecordingStateContext';
 import React, { useState, useEffect } from 'react';
 import { Switch } from '@/components/ui/switch';
 import { AlertTriangle, FolderCog, FolderOpen } from 'lucide-react';
@@ -27,6 +30,7 @@ export interface PerAppTarget {
 }
 
 export interface RecordingPreferences {
+  room_microphone?: boolean;
   save_folder: string;
   auto_save: boolean;
   file_format: string;
@@ -52,6 +56,8 @@ interface RecordingSettingsProps {
 
 export function RecordingSettings({ onSave }: RecordingSettingsProps) {
   const { updateRecordingsLocation, setSelectedDevices } = useConfig();
+  const room = useRoomMicrophone();
+  const recording = useRecordingState();
   const [preferences, setPreferences] = useState<RecordingPreferences>({
     save_folder: '',
     auto_save: true,
@@ -206,6 +212,9 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
 
   return (
     <div className="min-w-0 max-w-full space-y-5">
+      <div className="rounded-2xl border border-af-border bg-af-panel-2/40 p-5">
+        <RoomMicrophoneSetting enabled={room.enabled} disabled={recording.isRecording || recording.status === RecordingStatus.STARTING || room.loading || room.saving || saving || isChoosingFolder} onChange={(enabled) => { void room.update(enabled); }} />
+      </div>
       <div className="flex min-w-0 items-center justify-between gap-4 rounded-2xl border border-af-border bg-af-panel-2/40 p-5">
         <div className="min-w-0 flex-1">
           <h3 className="text-[15px] font-semibold text-af-text">Save audio</h3>
@@ -213,7 +222,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
             Keep each meeting's audio so you can play it back, fix who said what, and transcribe it again later.
           </p>
         </div>
-        <Switch checked={preferences.auto_save} onCheckedChange={handleAutoSaveToggle} disabled={saving} className="shrink-0" />
+        <Switch checked={preferences.auto_save} onCheckedChange={handleAutoSaveToggle} disabled={saving || room.saving} className="shrink-0" />
       </div>
 
       {preferences.auto_save ? (
@@ -223,7 +232,7 @@ export function RecordingSettings({ onSave }: RecordingSettingsProps) {
             {preferences.save_folder || 'Default folder'}
           </p>
           <div className="mt-3 flex flex-wrap gap-2">
-            <Button variant="secondary" size="sm" onClick={handleChangeFolder} disabled={isChoosingFolder || saving} loading={isChoosingFolder}>
+            <Button variant="secondary" size="sm" onClick={handleChangeFolder} disabled={isChoosingFolder || saving || room.saving} loading={isChoosingFolder}>
               <FolderCog />
               Change folder
             </Button>
