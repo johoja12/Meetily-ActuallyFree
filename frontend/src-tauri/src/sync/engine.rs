@@ -177,6 +177,10 @@ async fn records_for(
 }
 
 async fn write_meeting_file(conn: &mut SqliteConnection, library: &Library, device: &str, meeting: &str) -> Result<()> {
+    if !safe_id(meeting) {
+        log::warn!("Not syncing meeting with unusual id {meeting:?}");
+        return Ok(());
+    }
     let records = records_for(conn, library, Some(meeting)).await?;
     write_json_atomic(&library.meeting_file(device, meeting), &RecordFile { format: FORMAT, records })
 }
@@ -211,7 +215,14 @@ pub async fn import(pool: &SqlitePool, library: &Library, device: &str, clock: &
             files.extend(meetings);
         }
         for (path, meeting) in files {
-            import_file(pool, library, &other, &path, meeting.as_deref(), clock, &mut summary).await?;
+            if meeting.as_deref().is_some_and(|meeting| !safe_id(meeting)) {
+                continue;
+            }
+            // A file that cannot be applied is retried next pass; it must not
+            // hold back every other file.
+            if let Err(error) = import_file(pool, library, &other, &path, meeting.as_deref(), clock, &mut summary).await {
+                log::warn!("Could not apply {}: {error:#}", path.display());
+            }
         }
     }
     Ok(summary)
@@ -252,6 +263,43 @@ async fn import_file(
     tx.commit().await?;
     summary.deferred += deferred;
     Ok(())
+}
+
+/// Ids from other devices become file names; only plain ids are accepted.
+pub fn safe_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 128 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// The kept contact or group, with details only the dropped one had.
+/// Notes from both are kept. Every device computes the same result.
+fn merge_details(table: &str, kept: &Value, dropped: &Value) -> Value {
+    let mut merged = kept.clone();
+    let text = |row: &Value, column: &str| row.get(column).and_then(Value::as_str).map(str::trim).filter(|text| !text.is_empty()).map(str::to_string);
+    let fill: &[&str] = if table == "people" { &["email", "company", "role", "phone"] } else { &["color", "kind", "description", "schedule"] };
+    for column in fill {
+        if text(&merged, column).is_none() {
+            if let Some(value) = dropped.get(*column).filter(|value| !value.is_null()) {
+                merged[*column] = value.clone();
+            }
+        }
+    }
+    if table == "people" {
+        merged["notes"] = match (text(kept, "notes"), text(dropped, "notes")) {
+            (Some(a), Some(b)) if a != b => Value::String(format!("{a}\n\n{b}")),
+            (a, b) => a.or(b).map(Value::String).unwrap_or(Value::Null),
+        };
+        let manual = |row: &Value| row.get("is_manual").and_then(Value::as_i64).unwrap_or(0);
+        merged["is_manual"] = Value::from(manual(kept).max(manual(dropped)));
+    }
+    merged
+}
+
+async fn tombstoned(conn: &mut SqliteConnection, table: &str, id: &str) -> sqlx::Result<bool> {
+    let Some(spec) = tables::spec(table) else { return Ok(false) };
+    let key = key_string(spec, &serde_json::json!({ "id": id }));
+    let found: Option<i64> = sqlx::query_scalar("SELECT 1 FROM sync_versions WHERE table_name = ? AND row_key = ? AND deleted = 1")
+        .bind(table).bind(key).fetch_optional(conn).await?;
+    Ok(found.is_some())
 }
 
 /// Columns that name a contact (`person`) or a group (`group`).
@@ -360,9 +408,20 @@ async fn apply_records(
         if local.as_deref().is_some_and(|local| local >= record.v.as_str()) {
             continue;
         }
+        // A local edit not exported yet gets a newer version when it is, so
+        // it wins over anything already published.
+        let pending: Option<i64> = sqlx::query_scalar("SELECT 1 FROM sync_outbox WHERE table_name = ? AND row_key = ? LIMIT 1")
+            .bind(spec.name).bind(&key_text).fetch_optional(&mut *conn).await?;
+        if pending.is_some() {
+            continue;
+        }
         let meeting = spec.meeting
             .and_then(|column| row.as_ref().unwrap_or(&key).get(column).and_then(Value::as_str).map(str::to_string))
             .or_else(|| spec.meeting.and(file_meeting.map(str::to_string)));
+        if meeting.as_deref().is_some_and(|meeting| !safe_id(meeting)) {
+            continue;
+        }
+        clock.observe(&record.v);
         let kind = match spec.name { "people" => Some("person"), "groups" => Some("group"), _ => None };
         let redirect_away = kind.is_some_and(|kind| {
             let map = if kind == "person" { &people } else { &groups };
@@ -383,16 +442,29 @@ async fn apply_records(
                     row["folder_path"] = folder.map(Value::String).unwrap_or(Value::Null);
                 } else if let Some(meeting) = &meeting {
                     if !exists(&mut *conn, "meetings", meeting).await? {
-                        deferred += 1;
+                        // Its meeting was deleted: this change is moot, not late.
+                        if tombstoned(&mut *conn, "meetings", meeting).await? {
+                            record_version(&mut *conn, spec.name, &key_text, &record.v, true, Some(meeting)).await?;
+                        } else {
+                            deferred += 1;
+                        }
                         continue;
                     }
                 }
                 let mut missing = false;
+                let mut gone = false;
                 for (column, kind) in reference_columns(spec) {
                     if let Some(id) = row.get(*column).and_then(Value::as_str) {
                         let table = if *kind == "person" { "people" } else { "groups" };
-                        missing |= !exists(&mut *conn, table, id).await?;
+                        if !exists(&mut *conn, table, id).await? {
+                            missing = true;
+                            gone |= tombstoned(&mut *conn, table, id).await?;
+                        }
                     }
+                }
+                if gone {
+                    record_version(&mut *conn, spec.name, &key_text, &record.v, true, meeting.as_deref()).await?;
+                    continue;
                 }
                 if missing {
                     deferred += 1;
@@ -407,15 +479,34 @@ async fn apply_records(
                     )).bind(row.get("normalized_name").and_then(Value::as_str)).bind(&remote_id)
                         .fetch_optional(&mut *conn).await?;
                     if let Some(local_id) = same_name {
-                        let (keep, drop) = if remote_id < local_id { (remote_id.clone(), local_id.clone()) } else { (local_id.clone(), remote_id.clone()) };
+                        let local_row = tables::row_json(&mut *conn, spec, &serde_json::json!({ "id": local_id })).await?.unwrap_or(Value::Null);
+                        let (keep, drop, kept_row, dropped_row) = if remote_id < local_id {
+                            (remote_id.clone(), local_id.clone(), row.clone(), local_row)
+                        } else {
+                            (local_id.clone(), remote_id.clone(), local_row, row.clone())
+                        };
+                        // Published like a local edit, so a device that never
+                        // saw the dropped id can still follow old references.
                         sqlx::query("INSERT INTO sync_redirects (kind, from_id, to_id, created_at) VALUES (?, ?, ?, datetime('now')) \
                                      ON CONFLICT(kind, from_id) DO NOTHING")
                             .bind(kind).bind(&drop).bind(&keep).execute(&mut *conn).await?;
+                        let redirects = tables::spec("sync_redirects").expect("sync_redirects spec");
+                        let redirect_key = key_string(redirects, &serde_json::json!({ "kind": kind, "from_id": drop }));
+                        record_version(&mut *conn, "sync_redirects", &redirect_key, &clock.tick(now_ms()), false, None).await?;
                         if kind == "person" { people.insert(drop.clone(), keep.clone()); } else { groups.insert(drop.clone(), keep.clone()); }
-                        if drop == local_id {
-                            apply_redirect(&mut *conn, kind, &local_id, &remote_id).await?;
-                            tables::upsert(&mut *conn, spec, &row).await?;
+                        // Re-point and remove the dropped row wherever it exists
+                        // here (the local one, or a stale copy of the remote one).
+                        apply_redirect(&mut *conn, kind, &drop, &keep).await?;
+                        let merged = merge_details(spec.name, &kept_row, &dropped_row);
+                        tables::upsert(&mut *conn, spec, &merged).await?;
+                        let kept_key = key_string(spec, &serde_json::json!({ "id": keep }));
+                        record_version(&mut *conn, spec.name, &kept_key, &clock.tick(now_ms()), false, None).await?;
+                        if drop == remote_id {
+                            record_version(&mut *conn, spec.name, &key_text, &record.v, true, None).await?;
                         }
+                        set_state(&mut *conn, "dirty:library", "1").await?;
+                        summary.library = true;
+                        continue;
                     } else {
                         tables::upsert(&mut *conn, spec, &row).await?;
                     }
@@ -434,6 +525,8 @@ async fn apply_records(
             None => {
                 if spec.name == "meetings" {
                     if let Some(id) = key.get("id").and_then(Value::as_str) {
+                        // This device's own file for the meeting is now stale.
+                        set_state(&mut *conn, &format!("dirty:meeting:{id}"), "1").await?;
                         // Children first; foreign-key cascades may be off.
                         for child in TABLES.iter().filter(|child| child.meeting.is_some() && child.name != "meetings") {
                             let column = child.meeting.unwrap_or("meeting_id");
@@ -446,7 +539,6 @@ async fn apply_records(
             }
         }
         record_version(&mut *conn, spec.name, &key_text, &record.v, record.row.is_none(), meeting.as_deref()).await?;
-        clock.observe(&record.v);
         match &meeting {
             Some(meeting) => { summary.meetings.insert(meeting.clone()); }
             None => summary.library = true,
@@ -481,10 +573,40 @@ pub async fn import_voices(pool: &SqlitePool, library: &Library, device: &str) -
             continue;
         }
         let Some(file) = read_json::<crate::diarization::voice_profiles::VoicesFile>(&path) else { continue };
+        let known: std::collections::HashSet<String> = sqlx::query_scalar("SELECT id FROM people")
+            .fetch_all(&mut *conn).await?.into_iter().collect();
+        let (file, held) = hold_unknown_voices(file, &people, &known);
         changed |= crate::diarization::voice_profiles::import_voices(&file, &people)?;
-        set_state(&mut conn, &seen, &print).await?;
+        // Read again once the held contacts have arrived.
+        if held == 0 {
+            set_state(&mut conn, &seen, &print).await?;
+        }
     }
     Ok(changed)
+}
+
+/// Voices whose contact has not arrived yet are left out (and counted), so
+/// they are not saved for a contact this device would then forget.
+pub fn hold_unknown_voices(
+    mut file: crate::diarization::voice_profiles::VoicesFile,
+    redirects: &HashMap<String, String>,
+    known: &std::collections::HashSet<String>,
+) -> (crate::diarization::voice_profiles::VoicesFile, usize) {
+    let before = file.profiles.len();
+    file.profiles.retain(|profile| known.contains(resolve(redirects, &profile.person_id)));
+    let held = before - file.profiles.len();
+    (file, held)
+}
+
+/// Marks every meeting file and the library file for rewriting, for a
+/// library folder this device has not published to yet.
+pub async fn mark_all_dirty(pool: &SqlitePool) -> Result<()> {
+    sqlx::raw_sql(
+        "INSERT OR REPLACE INTO sync_state (key, value) SELECT 'dirty:meeting:' || id, '1' FROM meetings; \
+         INSERT OR REPLACE INTO sync_state (key, value) SELECT DISTINCT 'dirty:meeting:' || meeting_id, '1' FROM sync_versions WHERE meeting_id IS NOT NULL; \
+         INSERT OR REPLACE INTO sync_state (key, value) VALUES ('dirty:library', '1');",
+    ).execute(pool).await?;
+    Ok(())
 }
 
 /// Follows redirects to the id that is kept. Chains end within a few hops;
@@ -812,6 +934,173 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    async fn converge(devices: &mut [&mut Device], library: &Library) {
+        for _ in 0..3 {
+            for device in devices.iter_mut() {
+                device.sync(library).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn same_name_join_keeps_details_and_converges() {
+        let (library, root) = temp_library("join-details");
+        let mut a = Device::new("a").await;
+        let mut b = Device::new("b").await;
+        a.sql("INSERT INTO people (id, display_name, normalized_name, notes, email, created_at, updated_at) VALUES \
+               ('person-b-zzz', 'David Gurley', 'david gurley', 'Met at kickoff', 'dg@example.test', 'c', 'u');").await;
+        b.sql("INSERT INTO people (id, display_name, normalized_name, notes, company, created_at, updated_at) VALUES \
+               ('person-a-aaa', 'David Gurley', 'david gurley', NULL, 'Acme', 'c', 'u');").await;
+        converge(&mut [&mut a, &mut b], &library).await;
+        for device in [&a, &b] {
+            assert_eq!(
+                device.text("SELECT id || '|' || COALESCE(notes, '') || '|' || COALESCE(email, '') || '|' || COALESCE(company, '') FROM people").await,
+                vec!["person-a-aaa|Met at kickoff|dg@example.test|Acme".to_string()]
+            );
+        }
+        assert_eq!(a.synced_rows().await, b.synced_rows().await);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn rename_into_an_existing_name_converges() {
+        let (library, root) = temp_library("rename-join");
+        let mut a = Device::new("a").await;
+        let mut b = Device::new("b").await;
+        a.sql("INSERT INTO meetings (id, title, created_at, updated_at) VALUES ('m1', 'One', 'c', 'u'); \
+               INSERT INTO transcripts (id, meeting_id, transcript, timestamp, speaker) VALUES ('t1', 'm1', 'x', 'ts', 'Dave'); \
+               INSERT INTO people (id, display_name, normalized_name, created_at, updated_at) VALUES ('p-zzz', 'Dave', 'dave', 'c', 'u'); \
+               INSERT INTO person_speakers VALUES ('p-zzz', 'm1', 'Dave');").await;
+        converge(&mut [&mut a, &mut b], &library).await;
+        b.sql("INSERT INTO people (id, display_name, normalized_name, created_at, updated_at) VALUES ('p-aaa', 'David Gurley', 'david gurley', 'c', 'u');").await;
+        a.sql("UPDATE people SET display_name = 'David Gurley', normalized_name = 'david gurley' WHERE id = 'p-zzz';").await;
+        converge(&mut [&mut a, &mut b], &library).await;
+        for device in [&a, &b] {
+            assert_eq!(device.text("SELECT id FROM people").await, vec!["p-aaa".to_string()]);
+            assert_eq!(device.text("SELECT person_id FROM person_speakers").await, vec!["p-aaa".to_string()]);
+        }
+        assert_eq!(a.synced_rows().await, b.synced_rows().await);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn a_new_device_follows_join_redirects() {
+        let (library, root) = temp_library("third-device");
+        let mut a = Device::new("a").await;
+        let mut b = Device::new("b").await;
+        a.sql("INSERT INTO meetings (id, title, created_at, updated_at) VALUES ('ma', 'A', 'c', 'u'); \
+               INSERT INTO transcripts (id, meeting_id, transcript, timestamp, speaker) VALUES ('ta', 'ma', 'x', 'ts', 'David Gurley'); \
+               INSERT INTO people (id, display_name, normalized_name, created_at, updated_at) VALUES ('person-b-zzz', 'David Gurley', 'david gurley', 'c', 'u'); \
+               INSERT INTO person_speakers VALUES ('person-b-zzz', 'ma', 'David Gurley');").await;
+        b.sql("INSERT INTO people (id, display_name, normalized_name, created_at, updated_at) VALUES ('person-a-aaa', 'David Gurley', 'david gurley', 'c', 'u');").await;
+        converge(&mut [&mut a, &mut b], &library).await;
+        // Any contact edit rewrites A's library file, which no longer lists
+        // the dropped id; only a published redirect can explain A's old tag.
+        a.sql("UPDATE people SET notes = 'edited' WHERE id = 'person-a-aaa';").await;
+        converge(&mut [&mut a, &mut b], &library).await;
+        let mut c = Device::new("c").await;
+        let mut deferred = 0;
+        for _ in 0..3 {
+            deferred = c.sync(&library).await.deferred;
+        }
+        assert_eq!(deferred, 0);
+        assert_eq!(c.text("SELECT person_id FROM person_speakers").await, vec!["person-a-aaa".to_string()]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn children_of_a_deleted_meeting_are_not_retried_forever() {
+        let (library, root) = temp_library("deleted-children");
+        let mut a = Device::new("a").await;
+        let mut b = Device::new("b").await;
+        a.sql(MEETING).await;
+        converge(&mut [&mut a, &mut b], &library).await;
+        crate::database::repositories::person::PeopleRepository::rename_meeting_speaker(&b.pool, "m1", "Speaker 1", "Alice").await.unwrap();
+        b.export(&library).await;
+        a.sql("DELETE FROM transcripts WHERE meeting_id = 'm1'; DELETE FROM meetings WHERE id = 'm1';").await;
+        a.clock.observe(&b.clock.last());
+        a.export(&library).await;
+        let mut last = ImportSummary::default();
+        for _ in 0..3 {
+            last = a.sync(&library).await;
+            b.sync(&library).await;
+        }
+        assert_eq!(last.deferred, 0);
+        assert!(a.text("SELECT id FROM meetings").await.is_empty());
+        assert!(b.text("SELECT id FROM meetings").await.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn unexported_local_edit_is_not_overwritten_by_older_remote() {
+        let (library, root) = temp_library("pending-local");
+        let mut a = Device::new("a").await;
+        let mut b = Device::new("b").await;
+        a.sql(MEETING).await;
+        converge(&mut [&mut a, &mut b], &library).await;
+        a.sql("UPDATE meetings SET title = 'A edit' WHERE id = 'm1';").await;
+        a.export(&library).await;
+        // B edits later but imports before its next export.
+        b.sql("UPDATE meetings SET title = 'B edit' WHERE id = 'm1';").await;
+        b.import(&library).await;
+        assert_eq!(b.text("SELECT title FROM meetings").await, vec!["B edit".to_string()]);
+        converge(&mut [&mut b, &mut a], &library).await;
+        assert_eq!(a.text("SELECT title FROM meetings").await, vec!["B edit".to_string()]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn unsafe_meeting_ids_from_another_device_are_refused() {
+        let (library, root) = temp_library("unsafe-ids");
+        let mut a = Device::new("a").await;
+        let evil = Record {
+            t: "meetings".into(),
+            k: serde_json::json!({"id": "../../escape"}),
+            v: "0000000001000-000000-b".into(),
+            row: Some(serde_json::json!({"id": "../../escape", "title": "x", "created_at": "c", "updated_at": "u"})),
+        };
+        write_json_atomic(&library.meeting_file("b", "m1"), &RecordFile { format: FORMAT, records: vec![evil] }).unwrap();
+        a.import(&library).await;
+        assert!(a.text("SELECT id FROM meetings").await.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn one_bad_file_does_not_stop_the_others() {
+        let (library, root) = temp_library("bad-file");
+        let mut a = Device::new("a").await;
+        // A meetings row without its required title fails to insert.
+        let broken = Record {
+            t: "meetings".into(),
+            k: serde_json::json!({"id": "m-bad"}),
+            v: "0000000001000-000000-b".into(),
+            row: Some(serde_json::json!({"id": "m-bad", "title": null, "created_at": "c", "updated_at": "u"})),
+        };
+        let good = Record {
+            t: "meetings".into(),
+            k: serde_json::json!({"id": "m-good"}),
+            v: "0000000001000-000001-b".into(),
+            row: Some(serde_json::json!({"id": "m-good", "title": "Fine", "created_at": "c", "updated_at": "u"})),
+        };
+        write_json_atomic(&library.meeting_file("b", "m-bad"), &RecordFile { format: FORMAT, records: vec![broken] }).unwrap();
+        write_json_atomic(&library.meeting_file("b", "m-good"), &RecordFile { format: FORMAT, records: vec![good] }).unwrap();
+        a.import(&library).await;
+        assert_eq!(a.text("SELECT id FROM meetings").await, vec!["m-good".to_string()]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn voices_for_contacts_not_here_yet_are_held_back() {
+        use crate::diarization::voice_profiles::{VoiceProfile, VoicesFile};
+        let profile = |id: &str| VoiceProfile { person_id: id.into(), name: id.into(), embedding: vec![0.0; 128], samples: 2, model: String::new(), sources: Vec::new() };
+        let file = VoicesFile { profiles: vec![profile("p-known"), profile("p-dup"), profile("p-later")], tombstones: Default::default() };
+        let known: std::collections::HashSet<String> = ["p-known".to_string(), "p-kept".to_string()].into_iter().collect();
+        let redirects = HashMap::from([("p-dup".to_string(), "p-kept".to_string())]);
+        let (kept, held) = hold_unknown_voices(file, &redirects, &known);
+        assert_eq!(held, 1);
+        assert_eq!(kept.profiles.iter().map(|profile| profile.person_id.as_str()).collect::<Vec<_>>(), vec!["p-known", "p-dup"]);
     }
 
     #[test]

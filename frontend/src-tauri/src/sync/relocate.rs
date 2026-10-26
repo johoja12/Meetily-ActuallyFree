@@ -67,65 +67,91 @@ fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Rename when the library is on the same volume; otherwise copy, check
-/// sizes, and only then remove the original.
-pub fn move_folder(from: &Path, to: &Path) -> std::io::Result<()> {
+/// Puts a copy of `from` at `to`: a rename when the library is on the same
+/// volume (returns true), otherwise a size-checked copy that leaves the
+/// original in place (returns false) until the meeting points at the copy.
+fn place_folder(from: &Path, to: &Path) -> std::io::Result<bool> {
     if std::fs::rename(from, to).is_ok() {
-        return Ok(());
+        return Ok(true);
     }
     if let Err(error) = copy_dir(from, to) {
         let _ = std::fs::remove_dir_all(to);
         return Err(error);
     }
-    std::fs::remove_dir_all(from)
+    Ok(false)
+}
+
+fn inside(root: &Path, folder: &Path) -> bool {
+    Library { root: root.to_path_buf() }.to_relative(folder).is_some()
 }
 
 /// Moves every settled recording that is outside the library into it and
 /// points its meeting there. Returns the meetings moved. Does nothing while
 /// recording, retranscribing, or identifying speakers, since those write into
 /// recording folders.
-pub async fn relocate_settled(pool: &SqlitePool, library: &Library, now: SystemTime) -> Vec<String> {
+pub async fn relocate_settled(pool: &SqlitePool, library: &Library, now: SystemTime, exclude: &[PathBuf]) -> Vec<String> {
     if crate::audio::recording_commands::is_recording_active()
         || crate::audio::retranscription::is_retranscription_in_progress()
     {
         return Vec::new();
     }
     let Ok(_guard) = crate::diarization::try_operation_guard() else { return Vec::new() };
-    relocate_unguarded(pool, library, now).await
+    relocate_unguarded(pool, library, now, exclude).await
 }
 
-async fn relocate_unguarded(pool: &SqlitePool, library: &Library, now: SystemTime) -> Vec<String> {
+/// Moves at most one recording per pass, so the guards checked by the caller
+/// hold for the whole move and a big first sync does not block other work.
+/// Folders inside `exclude` (libraries this device used before) are shared
+/// with other devices and are never moved out.
+async fn relocate_unguarded(pool: &SqlitePool, library: &Library, now: SystemTime, exclude: &[PathBuf]) -> Vec<String> {
     let meetings: Vec<(String, String)> =
-        sqlx::query_as("SELECT id, folder_path FROM meetings WHERE folder_path IS NOT NULL")
+        sqlx::query_as("SELECT id, folder_path FROM meetings WHERE folder_path IS NOT NULL ORDER BY created_at")
             .fetch_all(pool)
             .await
             .unwrap_or_default();
-    let mut moved = Vec::new();
     for (meeting, folder) in meetings {
         let folder = PathBuf::from(folder);
-        if library.to_relative(&folder).is_some() || !folder.is_dir() || !is_settled(&folder, now) {
+        if inside(&library.root, &folder)
+            || exclude.iter().any(|root| inside(root, &folder))
+            || !folder.is_dir()
+            || !is_settled(&folder, now)
+        {
             continue;
         }
         let Some(target) = destination(library, &folder) else { continue };
-        if let Err(error) = move_folder(&folder, &target) {
-            log::warn!("Could not move {} into the library: {error}", folder.display());
-            continue;
-        }
+        let (from, to) = (folder.clone(), target.clone());
+        let renamed = match tokio::task::spawn_blocking(move || place_folder(&from, &to)).await {
+            Ok(Ok(renamed)) => renamed,
+            Ok(Err(error)) => {
+                log::warn!("Could not move {} into the library: {error}", folder.display());
+                return Vec::new();
+            }
+            Err(error) => {
+                log::warn!("Recording move task failed: {error}");
+                return Vec::new();
+            }
+        };
         let updated = sqlx::query("UPDATE meetings SET folder_path = ? WHERE id = ?")
             .bind(target.to_string_lossy().as_ref())
             .bind(&meeting)
             .execute(pool)
             .await;
-        match updated {
-            Ok(_) => moved.push(meeting),
-            Err(error) => {
-                // Put it back so the meeting still finds its audio.
-                log::warn!("Could not record the moved recording for {meeting}: {error}");
-                let _ = move_folder(&target, &folder);
+        if let Err(error) = updated {
+            // Undo so the meeting still finds its audio where it was.
+            log::warn!("Could not record the moved recording for {meeting}: {error}");
+            let _ = if renamed { std::fs::rename(&target, &folder) } else { std::fs::remove_dir_all(&target) };
+            return Vec::new();
+        }
+        if !renamed {
+            // The meeting points at the verified copy; the original is spare.
+            let original = folder.clone();
+            if let Ok(Err(error)) = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(&original)).await {
+                log::warn!("Moved {} into the library but could not remove the original: {error}", folder.display());
             }
         }
+        return vec![meeting];
     }
-    moved
+    Vec::new()
 }
 
 #[cfg(test)]
@@ -171,14 +197,37 @@ mod tests {
         let pool = migrated_pool().await;
         sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at, folder_path) VALUES ('m1', 'T', 'c', 'u', ?)")
             .bind(folder.to_string_lossy().as_ref()).execute(&pool).await.unwrap();
-        assert_eq!(relocate_unguarded(&pool, &library, later()).await, vec!["m1".to_string()]);
+        assert_eq!(relocate_unguarded(&pool, &library, later(), &[]).await, vec!["m1".to_string()]);
         let moved = library.recordings_dir().join("Meeting 1");
         assert!(moved.join("audio.mp4").is_file());
         assert!(!folder.exists());
         let path: String = sqlx::query_scalar("SELECT folder_path FROM meetings").fetch_one(&pool).await.unwrap();
         assert_eq!(PathBuf::from(path), moved);
         // Already inside: left alone.
-        assert!(relocate_unguarded(&pool, &library, later()).await.is_empty());
+        assert!(relocate_unguarded(&pool, &library, later(), &[]).await.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn one_folder_moves_per_pass_and_previous_libraries_stay() {
+        let root = temp("one-per-pass");
+        let library = Library::create_or_open(&root.join("library")).unwrap();
+        let old_library = root.join("old-library");
+        let first = recording(&root, "First", "completed");
+        let second = recording(&root, "Second", "completed");
+        let shared = recording(&old_library.join("recordings"), "Shared", "completed");
+        let pool = migrated_pool().await;
+        for (id, folder) in [("m1", &first), ("m2", &second), ("m3", &shared)] {
+            sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at, folder_path) VALUES (?, 'T', 'c', 'u', ?)")
+                .bind(id).bind(folder.to_string_lossy().as_ref()).execute(&pool).await.unwrap();
+        }
+        let exclude = vec![old_library.clone()];
+        assert_eq!(relocate_unguarded(&pool, &library, later(), &exclude).await.len(), 1);
+        assert_eq!(relocate_unguarded(&pool, &library, later(), &exclude).await.len(), 1);
+        assert!(relocate_unguarded(&pool, &library, later(), &exclude).await.is_empty());
+        // A recording inside a library this device used before is shared with
+        // devices still using it, so it is never moved out.
+        assert!(shared.join("audio.mp4").is_file());
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -101,7 +101,11 @@ impl Library {
     pub fn to_absolute(&self, relative: &str) -> Option<PathBuf> {
         let mut path = self.root.clone();
         for part in relative.split('/') {
-            if part.is_empty() || part == "." || part == ".." || part.contains('\\') || Path::new(part).is_absolute() {
+            // Exactly one plain component: no "..", no root, and no Windows
+            // drive or UNC prefix, which would replace the root when pushed.
+            let mut components = Path::new(part).components();
+            let plain = matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none();
+            if !plain || part.contains('\\') || part.contains(':') {
                 return None;
             }
             path.push(part);

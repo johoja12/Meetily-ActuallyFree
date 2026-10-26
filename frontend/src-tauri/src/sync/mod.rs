@@ -168,7 +168,10 @@ async fn run_pass(pool: &SqlitePool, config: &SyncConfig, voices: bool) -> anyho
     let seeded_key = format!("seeded:{}", root.display());
     if engine::get_state(&mut conn, &seeded_key).await?.is_none() {
         drop(conn);
+        // A folder this device has not published to: every row is versioned
+        // (seed) and every file is written there, not only changed ones.
         engine::seed_all(pool).await?;
+        engine::mark_all_dirty(pool).await?;
         conn = pool.acquire().await?;
         sqlx::query("INSERT OR REPLACE INTO sync_state (key, value) VALUES (?, '1')").bind(&seeded_key).execute(&mut *conn).await?;
     }
@@ -183,7 +186,7 @@ async fn run_pass(pool: &SqlitePool, config: &SyncConfig, voices: bool) -> anyho
         voices_changed = engine::import_voices(pool, &library, device).await?;
         engine::export_voices(&library, device)?;
     }
-    if !relocate::relocate_settled(pool, &library, std::time::SystemTime::now()).await.is_empty() {
+    if !relocate::relocate_settled(pool, &library, std::time::SystemTime::now(), &config.previous_roots).await.is_empty() {
         engine::export(pool, &library, device, &mut clock).await?;
     }
     write_device_info(&library, config)?;
@@ -268,6 +271,12 @@ pub fn enable_sync(library_root: String, device_name: Option<String>) -> Result<
     Library::create_or_open(&root).map_err(|error| format!("Cannot use this folder: {error}"))?;
     let mut config = config::load();
     config.enabled = true;
+    if let Some(previous) = config.library_root.take().filter(|previous| *previous != root) {
+        if !config.previous_roots.contains(&previous) {
+            config.previous_roots.push(previous);
+        }
+    }
+    config.previous_roots.retain(|previous| *previous != root);
     config.library_root = Some(root);
     if let Some(name) = device_name.map(|name| name.trim().to_string()).filter(|name| !name.is_empty()) {
         config.device_name = name;
@@ -337,6 +346,7 @@ mod tests {
             device_name: "Test Mac".into(),
             library_root: Some(root.clone()),
             enabled: true,
+            previous_roots: Vec::new(),
         };
         let imported = run_pass(&pool, &config, false).await.unwrap();
         assert_eq!(imported, Imported::default());
@@ -351,6 +361,25 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[tokio::test]
+    async fn changing_the_library_folder_republishes_everything() {
+        let base = std::env::temp_dir().join(format!("meetily-sync-move-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (first, second) = (base.join("first"), base.join("second"));
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        let pool = test_support::migrated_pool().await;
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES ('m1', 'T', 'c', 'u')").execute(&pool).await.unwrap();
+        tables::install_triggers(&pool).await.unwrap();
+        let mut config = SyncConfig { device_id: "device-test".into(), device_name: "Mac".into(), library_root: Some(first.clone()), enabled: true, ..Default::default() };
+        run_pass(&pool, &config, false).await.unwrap();
+        config.library_root = Some(second.clone());
+        config.previous_roots = vec![first.clone()];
+        run_pass(&pool, &config, false).await.unwrap();
+        assert!(second.join("devices/device-test/meetings/m1.json").is_file());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
     #[test]
     fn config_round_trips() {
         let config = SyncConfig {
@@ -358,6 +387,7 @@ mod tests {
             device_name: "Mac".into(),
             library_root: Some("/Users/me/Google Drive/Meetily".into()),
             enabled: true,
+            previous_roots: Vec::new(),
         };
         let text = serde_json::to_string(&config).unwrap();
         assert_eq!(serde_json::from_str::<SyncConfig>(&text).unwrap(), config);

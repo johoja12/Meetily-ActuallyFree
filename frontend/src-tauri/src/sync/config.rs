@@ -11,6 +11,10 @@ pub struct SyncConfig {
     pub device_name: String,
     pub library_root: Option<PathBuf>,
     pub enabled: bool,
+    /// Library folders this device used before. Recordings inside them are
+    /// shared with devices still using them, so they are never moved out.
+    #[serde(default)]
+    pub previous_roots: Vec<PathBuf>,
 }
 
 static CACHE: Mutex<Option<SyncConfig>> = Mutex::new(None);

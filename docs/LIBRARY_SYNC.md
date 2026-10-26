@@ -56,22 +56,36 @@ are skipped and read again on the next pass.
    size/mtime changed (`sync_state 'seen:<device>/<file>'`). Inside one
    transaction with capture off and deferred foreign keys: redirects, then
    people/groups, then meetings, then children, then tombstones (children
-   first). A record applies only if its version is newer. A child whose
-   meeting or contact is missing is deferred and the file is retried. A
-   meeting tombstone deletes the meeting's rows in every scoped table. A
-   remote null `folder_path` keeps the local one.
+   first). A record applies only if its version is newer and the row has no
+   unexported local change in `sync_outbox` (that change wins when it is
+   versioned). A child whose meeting or contact is missing is deferred and the
+   file is retried; if the parent was deleted, the child is recorded as
+   deleted instead. A meeting tombstone deletes the meeting's rows in every
+   scoped table and marks this device's own file for rewriting. A remote null
+   `folder_path` keeps the local one. Ids from other devices must be plain
+   (`[A-Za-z0-9_-]`, `engine::safe_id`) because they become file names, and
+   relative paths must be plain components (no `..`, root, drive or `:`). A
+   file that fails to apply is logged and retried without blocking others.
 4. Merge rules: same `normalized_name` with different ids keeps the smaller
-   id and stores a redirect; `merge_people` stores a redirect from the merged
-   contact. `apply_redirect` re-points `person_speakers`, `action_items`,
+   id, fills the kept row's empty details from the dropped one and keeps both
+   notes (`merge_details`), and stores a redirect. The merged row and the
+   redirect get new local versions and are published, so a device that never
+   saw the dropped id can follow old references. `merge_people` stores a
+   redirect from the merged contact. `apply_redirect` re-points `person_speakers`, `action_items`,
    `voice_speaker_matches` (or `meetings.group_id`) and removes the old row.
 5. Voices: each share has a version (`config::stamp`); forgets and share
    removals are tombstoned in `voice_profiles_sync.json`. `merge_remote` keeps
    the newest share per (person, meeting), drops shares older than a forget
-   or removal, follows redirects, and rebuilds embeddings.
+   or removal, follows redirects, and rebuilds embeddings. Voices whose
+   contact has not arrived yet are held back and the file is read again.
 6. Recordings: `relocate_settled` moves a folder whose `metadata.json` status
    is `completed` and whose files are unchanged for 2 minutes, while nothing
-   records, retranscribes or identifies speakers. Rename when possible,
-   otherwise copy, check sizes, delete. Name clashes get ` (2)`.
+   records, retranscribes or identifies speakers — one folder per pass, on a
+   blocking thread. Rename when possible; otherwise copy and check sizes,
+   point the meeting at the copy, then remove the original. Name clashes get
+   ` (2)`. Folders inside a library this device used before
+   (`previous_roots`) are never moved out, since other devices may still use
+   them. Choosing a new library folder republishes every meeting there.
 7. Worker: polls the outbox every 3 s and other devices every 30 s, runs on
    `sync_now`, and exports on quit (`flush`, bounded to 5 s). Emits
    `sync-status` and `sync-imported { meeting_ids, library, voices }`.
