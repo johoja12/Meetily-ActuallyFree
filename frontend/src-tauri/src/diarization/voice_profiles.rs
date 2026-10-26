@@ -609,6 +609,8 @@ pub async fn enroll_voice_profile(
     // name, so this meeting becomes an ordinary source of their voice.
     let _ = sqlx::query("DELETE FROM voice_speaker_matches WHERE meeting_id = ? AND person_id = ? AND status = 'applied'")
         .bind(&meeting_id).bind(&person_id).execute(pool).await;
+    // A changed voice can name unnamed speakers in any meeting.
+    super::voice_learning::check_all();
     Ok(info)
 }
 
@@ -656,7 +658,9 @@ pub async fn enroll_person_voice(
             "None of {name}'s last {tried} meetings has clear call audio of them. Learning a voice needs meetings recorded with Save audio on, where they speak for turns of 2 to 15 seconds."
         ));
     }
-    Ok(store_shares(&person_id, &name, shares, meeting_id.is_none())?)
+    let info = store_shares(&person_id, &name, shares, meeting_id.is_none())?;
+    super::voice_learning::check_all();
+    Ok(info)
 }
 
 /// Voices Meetily knows, each under its contact's current name. A voice whose
