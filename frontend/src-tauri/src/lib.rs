@@ -64,6 +64,7 @@ pub mod parakeet_engine;
 pub mod paths;
 pub mod state;
 pub mod summary;
+pub mod sync;
 pub mod tray;
 pub mod utils;
 pub mod whisper_engine;
@@ -499,6 +500,7 @@ pub fn run() {
             #[cfg(windows)]
             onnx_runtime::initialize(_app.handle());
             diarization::voice_learning::start(_app.handle().clone());
+            sync::start(_app.handle().clone());
             log::info!("Application setup complete");
 
             // Initialize system tray
@@ -662,6 +664,11 @@ pub fn run() {
             diarization::voice_learning::undo_voice_matches,
             diarization::voice_learning::apply_voices_to_past_meetings,
             diarization::voice_learning::get_voice_learning_running,
+            sync::get_sync_status,
+            sync::enable_sync,
+            sync::disable_sync,
+            sync::sync_now,
+            sync::set_sync_device_name,
             save_transcript,
             analytics::commands::init_analytics,
             analytics::commands::disable_analytics,
@@ -989,6 +996,8 @@ pub fn run() {
                 tauri::RunEvent::Exit => {
                     log::info!("Application exiting, cleaning up resources...");
                     tauri::async_runtime::block_on(async {
+                        // Publish the last edits before the database closes.
+                        sync::flush().await;
                         // Clean up database connection and checkpoint WAL
                         if let Some(app_state) = _app_handle.try_state::<state::AppState>() {
                             log::info!("Starting database cleanup...");

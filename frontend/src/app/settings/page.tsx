@@ -8,7 +8,7 @@
 import { Suspense, useEffect, useState } from 'react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { invoke } from '@tauri-apps/api/core';
-import { AudioLines, CalendarDays, Cpu, FileAudio, FlaskConical, Info, Mic, Radar, Settings2, Sparkles, type LucideIcon } from 'lucide-react';
+import { AudioLines, CalendarDays, Cloud, Cpu, FileAudio, FlaskConical, Info, Mic, Radar, Settings2, Sparkles, type LucideIcon } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useConfig } from '@/contexts/ConfigContext';
 import { useImportDialog } from '@/contexts/ImportDialogContext';
@@ -24,9 +24,10 @@ import { OptionalModelDownloads } from '@/components/OptionalModelDownloads';
 import { LocalStackStatus } from '@/components/LocalStackStatus';
 import { AboutSettings } from '@/components/AboutSettings';
 import { LabsSettings } from '@/components/LabsSettings';
+import { SyncSettings } from '@/components/SyncSettings';
 import { AppAudioCard } from '@/components/recording/AppAudioSource';
 
-type SectionId = 'general' | 'recording' | 'transcription' | 'summaries' | 'detection' | 'calendar' | 'local' | 'labs' | 'about';
+type SectionId = 'general' | 'recording' | 'transcription' | 'summaries' | 'detection' | 'calendar' | 'sync' | 'local' | 'labs' | 'about';
 
 const SECTIONS: Array<{ id: SectionId; label: string; hint: string; description: string; icon: LucideIcon }> = [
   { id: 'general', label: 'General', hint: 'Theme, name, notifications', description: 'How Meetily looks, what it calls you, and where it keeps your files.', icon: Settings2 },
@@ -35,6 +36,7 @@ const SECTIONS: Array<{ id: SectionId; label: string; hint: string; description:
   { id: 'summaries', label: 'Summaries', hint: 'Model, language', description: 'Which AI model writes summaries and answers Ask AI, and in what language.', icon: Sparkles },
   { id: 'calendar', label: 'Calendar', hint: 'Meeting titles, reminders', description: 'Use scheduled events to name recordings and remind you to record.', icon: CalendarDays },
   { id: 'detection', label: 'Meeting detection', hint: 'Prompt to record', description: 'Get a prompt to record when a call starts in another app.', icon: Radar },
+  { id: 'sync', label: 'Sync', hint: 'Google Drive, other computers', description: 'Keep meetings and recordings in step across your computers through a shared folder.', icon: Cloud },
   { id: 'local', label: 'Local AI', hint: 'Runtime status', description: 'The on-device engines that run transcription and summaries.', icon: Cpu },
   { id: 'labs', label: 'Labs', hint: 'Experimental features', description: 'Experimental features. Each stays off until you turn it on, and may change in later versions.', icon: FlaskConical },
   { id: 'about', label: 'About', hint: 'Version, updates', description: 'Version, updates and links.', icon: Info },
@@ -170,6 +172,7 @@ function SettingsInner() {
             {active === 'summaries' && <SummaryModelSettings />}
             {active === 'calendar' && <CalendarSettings />}
             {active === 'detection' && <MeetingDetectionSettings />}
+            {active === 'sync' && <SyncSettings />}
             {active === 'local' && <LocalStackStatus />}
             {active === 'labs' && <LabsSettings />}
             {active === 'about' && <AboutSettings />}

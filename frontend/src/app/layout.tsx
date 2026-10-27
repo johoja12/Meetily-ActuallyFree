@@ -26,6 +26,7 @@ import { OnboardingProvider } from '@/contexts/OnboardingContext'
 import { OptionalModelDownloadsProvider } from '@/contexts/OptionalModelDownloadsContext'
 import { DownloadProgressToastProvider } from '@/components/shared/DownloadProgressToast'
 import { VoiceMatchNotifier } from '@/components/VoiceMatchNotifier'
+import { SyncNotifier } from '@/components/SyncNotifier'
 import { UpdateCheckProvider } from '@/components/UpdateCheckProvider'
 import { RecordingPostProcessingProvider } from '@/contexts/RecordingPostProcessingProvider'
 import { ImportDialogProvider } from '@/contexts/ImportDialogContext'
@@ -532,6 +533,7 @@ export default function RootLayout({
                                 {/* Download progress toast provider - listens for background downloads */}
                                 <DownloadProgressToastProvider />
                                 <VoiceMatchNotifier />
+                                <SyncNotifier />
 
                                 {/* Show onboarding or main app */}
                                 {showOnboarding ? (

@@ -497,6 +497,14 @@ function handle(cmd: string, args: Args): unknown {
         setTimeout(() => resolve({ person_id: person.id, name: person.displayName, samples: voice.samples, meetings: voice.meetings }), 900),
       );
     }
+    case 'get_sync_status':
+    case 'disable_sync':
+      return { enabled: false, library_root: null, device_id: 'device-preview', device_name: 'Preview Mac', running: false, last_sync: null, last_error: null, devices: [] };
+    case 'enable_sync':
+    case 'set_sync_device_name':
+      return { enabled: cmd === 'enable_sync', library_root: (args.libraryRoot as string) ?? null, device_id: 'device-preview', device_name: (args.deviceName as string) || (args.name as string) || 'Preview Mac', running: false, last_sync: new Date().toISOString(), last_error: null, devices: [] };
+    case 'sync_now':
+      return null;
     case 'get_voice_learning_running':
       return false;
     case 'apply_voices_to_past_meetings':

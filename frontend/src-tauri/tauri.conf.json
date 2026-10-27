@@ -73,6 +73,7 @@
                         "core:window:allow-internal-toggle-maximize",
                         "store:default",
                         "dialog:allow-save",
+                        "dialog:allow-open",
                         "notification:default",
                         "notification:allow-is-permission-granted",
                         "updater:default",

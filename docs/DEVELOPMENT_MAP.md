@@ -379,6 +379,16 @@ The focused `tests/lib/speaker-colors.test.mjs` checks slot continuity and the
 contact colour; the Next production CSS output must also contain every dot
 palette class.
 
+### Library sync
+
+Settings > Sync keeps installs in step through a folder a cloud client syncs
+(Google Drive for desktop and similar). `src-tauri/src/sync/` owns capture
+triggers, versions, export/import, contact redirects, voice merging and moving
+settled recordings into the library. Read [LIBRARY_SYNC.md](LIBRARY_SYNC.md)
+before changing a synced table, adding a table that should sync, or changing
+how recordings are saved or moved: a new synced table needs a `TABLES` entry,
+and a schema change keeps working because rows travel as column-named JSON.
+
 Labs roadmap features 1, 3, 7, 8, and 12 are mapped in
 [LABS_MACWHISPER_FEATURES.md](LABS_MACWHISPER_FEATURES.md). Read it before
 changing meeting detection, recorded audio seeking, named voice enrollment,

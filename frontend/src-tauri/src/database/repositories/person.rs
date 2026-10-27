@@ -794,6 +794,16 @@ impl PeopleRepository {
             .bind(source_id)
             .execute(&mut *tx)
             .await?;
+        // Another device may tag the merged contact before it hears of the
+        // merge; sync follows this redirect instead of dropping that tag.
+        sqlx::query(
+            "INSERT INTO sync_redirects (kind, from_id, to_id, created_at) VALUES ('person', ?, ?, datetime('now')) \
+             ON CONFLICT(kind, from_id) DO UPDATE SET to_id = excluded.to_id",
+        )
+        .bind(source_id)
+        .bind(target_id)
+        .execute(&mut *tx)
+        .await?;
 
         let merged_notes = match (target.1.filter(|n| !n.trim().is_empty()), source.0.filter(|n| !n.trim().is_empty())) {
             (Some(kept), Some(extra)) => Some(format!("{}\n\n{}", kept, extra)),
@@ -2127,6 +2137,8 @@ mod tests {
              CREATE TABLE transcripts (id TEXT PRIMARY KEY, meeting_id TEXT NOT NULL, speaker TEXT); \
              CREATE TABLE action_items (id TEXT PRIMARY KEY, meeting_id TEXT NOT NULL, text TEXT NOT NULL, \
                  owner_label TEXT, person_id TEXT, updated_at TEXT NOT NULL DEFAULT 'now'); \
+             CREATE TABLE sync_redirects (kind TEXT NOT NULL, from_id TEXT NOT NULL, to_id TEXT NOT NULL, \
+                 created_at TEXT NOT NULL, PRIMARY KEY (kind, from_id)); \
              CREATE TABLE voice_speaker_matches (meeting_id TEXT NOT NULL, original_label TEXT NOT NULL, \
                  person_id TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, \
                  PRIMARY KEY (meeting_id, original_label, person_id)); \
