@@ -5,6 +5,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { CalendarDays } from 'lucide-react';
 import { useCalendar } from '@/hooks/useCalendar';
 import type { CalendarMeeting } from '@/lib/calendar-meetings';
+import { MEETING_CALENDAR_LINK_EVENT } from '@/lib/calendar-attendees';
+import { announceChange } from '@/lib/workspace-api';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { calendarTime } from './CalendarMeetings';
@@ -63,7 +65,16 @@ function SavedSuggestions({ meetingId, onRename }: { meetingId: string; onRename
             try {
               const renamed = await onRename(event.title);
               if (request === generation.current) {
-                if (renamed) { setOpen(false); setResult(null); }
+                if (renamed) {
+                  setOpen(false); setResult(null);
+                  // Named from this event: its attendees become speaker suggestions.
+                  invoke('link_meeting_calendar_event', { meetingId, event })
+                    .then(() => {
+                      window.dispatchEvent(new CustomEvent(MEETING_CALENDAR_LINK_EVENT, { detail: { meetingId } }));
+                      announceChange('people');
+                    })
+                    .catch(error => console.warn('Could not link this meeting to its calendar event', error));
+                }
                 else setError('Could not rename this recording. Try again.');
               }
             } catch { if (request === generation.current) setError('Could not rename this recording. Try again.'); }

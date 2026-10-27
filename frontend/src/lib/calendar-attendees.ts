@@ -30,6 +30,9 @@ export interface InviteSuggestion {
   assigned: boolean;
 }
 
+/** Fired with `{ meetingId }` after a meeting's calendar link changes. */
+export const MEETING_CALENDAR_LINK_EVENT = 'af-meeting-calendar-link';
+
 interface ContactLike { id: string; displayName: string; email?: string | null }
 
 const nameKey = (value: string) => value.trim().replace(/\s+/g, ' ').toLowerCase();

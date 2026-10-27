@@ -7,6 +7,7 @@ mock.module('@tauri-apps/api/core', () => ({invoke: async (command: string, args
 }}));
 mock.module('@/contexts/WorkspaceContext', () => ({useWorkspace: () => ({people: [{id:'host', displayName:'Host', meetingCount:1}]})}));
 mock.module('@/hooks/useUserName', () => ({useUserName: () => 'Andrew'}));
+mock.module('@/hooks/useInviteAttendees', () => ({useInviteAttendees: () => []}));
 mock.module('@/lib/workspace-api', () => ({announceChange: () => {}}));
 mock.module('sonner', () => ({toast: {success: () => {}, error: () => {}}}));
 const wrap = ({children}: any) => <div>{children}</div>;

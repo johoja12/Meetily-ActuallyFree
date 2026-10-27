@@ -1,7 +1,9 @@
 'use client';
 
 /**
- * "Who is Speaker 2?" One searchable list: yourself, your contacts (with role
+ * "Who is Speaker 2?" One searchable list: yourself, the attendees of the
+ * calendar invite the meeting was named from (matched to contacts by email,
+ * then name), your contacts (with role
  * and company so namesakes are easy to tell apart), "add as a new contact" for
  * a typed name, and the other speakers in the meeting to merge with. Works for
  * saved meetings (Rust relabels and links the contact) and live recordings.
@@ -9,7 +11,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
-import { GitMerge, Unlink, UserPlus, UserRound } from 'lucide-react';
+import { CalendarDays, GitMerge, Unlink, UserPlus, UserRound } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from '@/components/ui/command';
@@ -17,6 +19,8 @@ import { Avatar } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { useWorkspace } from '@/contexts/WorkspaceContext';
 import { useUserName } from '@/hooks/useUserName';
+import { useInviteAttendees } from '@/hooks/useInviteAttendees';
+import { inviteSuggestions } from '@/lib/calendar-attendees';
 import { announceChange } from '@/lib/workspace-api';
 import { displaySpeaker, isUserSpeaker, speakerDot, splitSpeakerLabel } from '@/utils/speakerUtils';
 
@@ -77,7 +81,13 @@ export function SpeakerIdentityDialog({
   const current = components.length > 1 ? selectedSpeaker : (speaker ?? '');
   const canRemove = !!current && !isGenerated(current) && !isUserSpeaker(current);
   const trimmed = query.trim();
-  const exact = people.some((person) => person.displayName.toLowerCase() === trimmed.toLowerCase());
+  const attendees = useInviteAttendees(meetingId, open);
+  // Attendees already used for a speaker sink to the bottom of the section.
+  const invited = useMemo(() => inviteSuggestions(attendees, people, speakers), [attendees, people, speakers]);
+  const invitedPeople = useMemo(() => new Set(invited.flatMap((entry) => (entry.personId ? [entry.personId] : []))), [invited]);
+  const contacts = useMemo(() => people.filter((person) => !invitedPeople.has(person.id)), [people, invitedPeople]);
+  const exact = people.some((person) => person.displayName.toLowerCase() === trimmed.toLowerCase())
+    || invited.some((entry) => entry.name.toLowerCase() === trimmed.toLowerCase());
   const mergeTargets = useMemo(() => [...new Set(speakers.flatMap(splitSpeakerLabel))].filter((label) => label !== current), [speakers, current]);
 
   const apply = async (target: string) => {
@@ -197,9 +207,31 @@ export function SpeakerIdentityDialog({
                 </CommandItem>
               </CommandGroup>
             )}
-            {people.length > 0 && (
+            {invited.length > 0 && (
+              <CommandGroup heading="In this meeting's invite">
+                {invited.map((entry) => (
+                  <CommandItem
+                    key={entry.key}
+                    value={`invite ${entry.name} ${entry.key}`}
+                    keywords={entry.email ? [entry.email] : []}
+                    onSelect={() => apply(entry.name)}
+                    disabled={saving}
+                  >
+                    <Avatar name={entry.name} size="sm" />
+                    <span className="min-w-0 flex-1">
+                      <span className={cn('block truncate', entry.assigned ? 'text-af-text-3' : 'text-af-text')}>{entry.name}</span>
+                      <span className="block truncate text-[11px] text-af-text-3">
+                        {[entry.assigned ? 'Already a speaker' : null, entry.personId ? null : 'New contact', entry.email].filter(Boolean).join(' · ')}
+                      </span>
+                    </span>
+                    <CalendarDays className="text-af-text-4" />
+                  </CommandItem>
+                ))}
+              </CommandGroup>
+            )}
+            {contacts.length > 0 && (
               <CommandGroup heading="Contacts">
-                {people.map((person) => (
+                {contacts.map((person) => (
                   <CommandItem
                     key={person.id}
                     value={`${person.displayName} ${person.id}`}

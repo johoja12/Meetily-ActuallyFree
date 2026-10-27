@@ -6,6 +6,7 @@
  * | Ask AI panel. The record card floats over the transcript column.
  */
 import { CalendarTitleSuggestions } from '@/components/calendar/CalendarMeetings';
+import type { CalendarMeeting } from '@/lib/calendar-meetings';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Copy, Globe, PanelRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -24,7 +25,7 @@ import { EditableTitle } from '@/components/ui/editable-title';
 import { Hint } from '@/components/ui/tooltip';
 import { useRecordingClock } from '@/components/recording/RecordingPill';
 import { LivePanel, type LivePanelTab } from '@/components/recording/LivePanel';
-import { automaticTitle, onLiveSessionChange, readLiveTitle, writeLiveTitle, type LiveTitle } from '@/lib/live-session';
+import { automaticTitle, chooseLiveCalendarEvent, onLiveSessionChange, readLiveTitle, renameLiveTitle, writeLiveTitle, type LiveTitle } from '@/lib/live-session';
 import { formatClock } from '@/lib/dates';
 import type { LiveLine } from '@/lib/live-context';
 import { speakerKey, replaceSpeakerComponent } from '@/utils/speakerUtils';
@@ -134,9 +135,15 @@ export function LiveSession({
   const existingTitles = useMemo(() => meetings.map((meeting) => meeting.title), [meetings]);
 
   const rename = (next: string) => {
-    writeLiveTitle({ title: next, manual: true, startedAt: live?.startedAt ?? Date.now() });
+    renameLiveTitle(next);
     setMeetingTitle(next);
     return true;
+  };
+
+  // The chosen event's attendees become speaker suggestions.
+  const chooseCalendarEvent = (event: CalendarMeeting) => {
+    chooseLiveCalendarEvent(event);
+    setMeetingTitle(event.title);
   };
 
   // Picking a group mid-call also retitles the meeting, unless you named it yourself.
@@ -202,7 +209,7 @@ export function LiveSession({
                   </span>
                   <span className="tabular-nums text-af-text-3">{formatClock(elapsed)}</span>
                 </span>
-                <CalendarTitleSuggestions startedAt={live?.startedAt ?? Date.now() - elapsed * 1000} onSelect={rename} disabled={isStopping || isProcessingStop} />
+                <CalendarTitleSuggestions startedAt={live?.startedAt ?? Date.now() - elapsed * 1000} onSelect={chooseCalendarEvent} disabled={isStopping || isProcessingStop} />
                 <GroupPicker value={pendingGroup?.id ?? null} onChange={changeGroup} placeholder="Add to group" />
                 {detectedSpeakers.length > 0 && (
                   <button
