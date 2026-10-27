@@ -48,7 +48,29 @@ test('only one current meeting is applied automatically; several ask; plain even
   const one = meeting('one', -5, 25);
   const focus = { ...meeting('focus', -10, 50), is_meeting: false };
   assert.deepEqual(autoCalendarChoice([one, focus, meeting('ended', -30, 0)], now), { kind: 'one', event: one });
-  assert.deepEqual(autoCalendarChoice([one, meeting('two', 10, 40)], now), { kind: 'many', count: 2 });
+  assert.deepEqual(autoCalendarChoice([one, meeting('two', 3, 40)], now), { kind: 'many', count: 2 });
   assert.equal(autoCalendarChoice([focus], now), null);
   assert.equal(autoCalendarChoice([], now), null);
+});
+
+test('a meeting names a recording automatically only once started or within five minutes', async () => {
+  const { autoCalendarChoice } = await import('../../src/lib/calendar-meetings');
+  assert.equal(autoCalendarChoice([meeting('later', 14, 44)], now), null);
+  const soon = meeting('soon', 4, 34);
+  assert.deepEqual(autoCalendarChoice([soon, meeting('later', 14, 44)], now), { kind: 'one', event: soon });
+});
+
+test('a Choose request waits for the calendar menu to appear', async () => {
+  const { requestCalendarTitleMenu, takeCalendarTitleMenuRequest } = await import('../../src/lib/calendar-meetings');
+  const navigated: string[] = [];
+  const dispatched: string[] = [];
+  Object.assign(globalThis, { window: { location: { pathname: '/meetings/x' }, dispatchEvent: (event: { type: string }) => { dispatched.push(event.type); return true; } }, CustomEvent: class { constructor(public type: string) {} } });
+  requestCalendarTitleMenu(href => navigated.push(href), now);
+  assert.deepEqual(navigated, ['/']);
+  assert.equal(takeCalendarTitleMenuRequest(now), true);
+  assert.equal(takeCalendarTitleMenuRequest(now), false);
+  (globalThis as any).window.location.pathname = '/';
+  requestCalendarTitleMenu(href => navigated.push(href));
+  assert.deepEqual(dispatched, ['af-open-calendar-title']);
+  assert.equal(navigated.length, 1);
 });
