@@ -44,7 +44,8 @@ group is pending, the hook reads `calendar_snapshot` (the cache; no new query)
 and `autoCalendarChoice` (`lib/calendar-meetings.ts`) looks at current/soon
 events that are meetings (`is_meeting`). Exactly one names the recording (a
 manual title) and a toast offers **Undo** (`undoCalendarTitle`: back to the
-automatic title, event dropped, only while the calendar title still stands) and
+automatic title, recomputed at click time so a group chosen since applies, and
+event dropped; refused once another title or event was chosen, or after Stop) and
 **Choose another**. Several leave the automatic title and offer **Choose**. Both
 open the header menu through the `af-open-calendar-title` window event. Solo
 events (no attendees, no meeting link) never name a recording automatically.
@@ -69,11 +70,14 @@ from `mailto:`, lowercased; a missing or email-shaped name comes from the email
 the live title. `inviteSuggestions` (`lib/calendar-attendees.ts`) matches each
 attendee to a contact by email, then name, and puts attendees already used for a
 speaker last. `SpeakerIdentityDialog` shows them under "In this meeting's invite"
-above Contacts (matched contacts are not repeated). Picking one goes through the
-ordinary rename, which creates the contact; then `fill_attendee_emails` (after
-linking and after `rename_meeting_speaker` / `reassign_transcript_speaker`) gives a
-tagged contact without an email the invite's address when exactly one attendee
-has that name and no other contact uses it.
+above Contacts (matched contacts are not repeated), followed by "Wrong meeting?
+Stop suggesting this invite", which unlinks the event (`unlink_meeting_calendar_event`,
+or clears the live title's event). Picking an attendee goes through the ordinary
+rename, which creates the contact. When an event is linked, `fill_attendee_emails`
+gives every tagged contact without an email the invite's address when exactly one
+attendee has that name and no other contact uses it; after a rename
+(`link::after_rename`) only the contacts just named are considered, so an email a
+user cleared is not refilled by an unrelated rename.
 
 ## Native ownership and privacy
 
@@ -86,11 +90,13 @@ Unix seconds for its NSDate query boundaries; it returns an owned UTF-8 allocati
 that Rust always frees. Calendar sources/events do not enter telemetry or logs.
 Notes/location are inspected only locally for a meeting-link signal; they are not
 returned to JavaScript, persisted, or sent to a model.
-Attendee names and emails are returned to the window with events. They are
-persisted only for a meeting whose title came from that event
-(`meeting_calendar_events`, local database, and the library sync folder when sync
-is on) and may become a contact's email. They are never sent to a model or
-service.
+Attendee names and emails (other people's data) are returned to the window with
+events. They are persisted only for a meeting linked to that event, which happens
+when its title came from the event; a later rename keeps the link until "Stop
+suggesting this invite" or another event replaces it. Every invitee of a linked
+meeting is stored in the local database and, when library sync is on, in the
+sync folder; an invitee's email may become a tagged contact's email. Calendar
+code sends none of it to a model or service.
 
 `calendar_settings.json` stores only switches and selected calendar identifiers.
 Connection activation is persisted by native completion after permission succeeds,
@@ -137,11 +143,15 @@ in sessionStorage. Invalid/stale selections fall back to normal title behavior.
 Invite attendees (October 27): native tests cover attendee normalization
 (`calendar::attendees`), link/get/replace/unlink, refusal of invalid events and
 missing meetings, removal with the meeting with foreign keys off, email filling
-(single match, shared name, existing email, address used by another contact) and
-a two-device sync round trip with delete. Frontend tests cover `autoCalendarChoice`,
-the live title keeping its event and Undo, `inviteSuggestions` matching/order/
-dedupe, the picker section and rename, and Choose opening the header menu.
-`useRecordingStart`'s toast wiring has no hook-level test. EventKit attendee
+(single match, shared name, existing email, address used by another contact, a
+rename filling only the person named) and a two-device sync round trip through
+`delete_meeting`. Frontend tests cover `autoCalendarChoice`,
+the live title keeping its event, Undo (renamed, other event, ended), linking the
+live event, `inviteSuggestions` matching/order/dedupe, the picker section, rename
+and unlink, `useInviteAttendees` loading and refresh, and Choose opening the
+header menu. `useRecordingStart`'s toast wiring and the call order inside
+`useRecordingStop` (link before the live session is cleared) have no hook-level
+test. EventKit attendee
 fields (names, `mailto:` URLs, room types, organizer) are unverified against a real
 account. A recording recovered after a crash loses the live link; Suggest name
 links it again. Attendees are a snapshot from when the meeting was linked.

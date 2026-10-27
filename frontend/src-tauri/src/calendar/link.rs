@@ -83,6 +83,11 @@ pub async fn unlink(pool: &SqlitePool, meeting_id: &str) -> sqlx::Result<()> {
 /// name, and no other contact already uses the address. Returns how many
 /// contacts changed.
 pub async fn fill_attendee_emails(pool: &SqlitePool, meeting_id: &str) -> sqlx::Result<u64> {
+    fill_emails(pool, meeting_id, None).await
+}
+
+/// `only`: normalized names to consider; None for every tagged contact.
+async fn fill_emails(pool: &SqlitePool, meeting_id: &str, only: Option<&[String]>) -> sqlx::Result<u64> {
     let Some(linked) = get(pool, meeting_id).await? else { return Ok(0) };
     let tagged: Vec<(String, String)> = sqlx::query_as(
         "SELECT DISTINCT p.id, p.normalized_name FROM people p JOIN person_speakers ps ON ps.person_id = p.id \
@@ -93,6 +98,9 @@ pub async fn fill_attendee_emails(pool: &SqlitePool, meeting_id: &str) -> sqlx::
     .await?;
     let mut changed = 0;
     for (person_id, normalized) in tagged {
+        if only.is_some_and(|names| !names.contains(&normalized)) {
+            continue;
+        }
         let mut matching = linked
             .attendees
             .iter()
@@ -113,6 +121,23 @@ pub async fn fill_attendee_emails(pool: &SqlitePool, meeting_id: &str) -> sqlx::
         changed += updated.rows_affected();
     }
     Ok(changed)
+}
+
+/// After a speaker in the meeting was named `to` ("A" or "A + B"): fill the
+/// email of only those contacts, so an email the user cleared on someone else
+/// is not refilled by an unrelated rename. Returns how many contacts changed.
+pub async fn after_rename(pool: &SqlitePool, meeting_id: &str, to: &str) -> u64 {
+    let names: Vec<String> = to.split(" + ").map(normalize_person_name).filter(|name| !name.is_empty()).collect();
+    if names.is_empty() {
+        return 0;
+    }
+    match fill_emails(pool, meeting_id, Some(&names)).await {
+        Ok(changed) => changed,
+        Err(error) => {
+            log::warn!("Could not fill contact emails from the invite: {error}");
+            0
+        }
+    }
 }
 
 #[tauri::command]
@@ -257,7 +282,20 @@ mod tests {
         let pool = pool_with_meeting().await;
         link(&pool, "m1", event("a", vec![attendee("Jane Doe", "jane@a.com")])).await.unwrap();
         PeopleRepository::rename_meeting_speaker(&pool, "m1", "Speaker 1", "Jane Doe").await.unwrap();
-        assert_eq!(fill_attendee_emails(&pool, "m1").await.unwrap(), 1);
+        assert_eq!(after_rename(&pool, "m1", "Jane Doe").await, 1);
         assert_eq!(email_of(&pool, "Jane Doe").await.as_deref(), Some("jane@a.com"));
+    }
+
+    #[tokio::test]
+    async fn a_rename_fills_only_the_person_just_named() {
+        let pool = pool_with_meeting().await;
+        PeopleRepository::rename_meeting_speaker(&pool, "m1", "Speaker 1", "Jane Doe").await.unwrap();
+        link(&pool, "m1", event("a", vec![attendee("Jane Doe", "jane@a.com"), attendee("Bob Roe", "bob@a.com")])).await.unwrap();
+        // The user clears Jane's email on purpose; naming Bob must not refill it.
+        sqlx::query("UPDATE people SET email = NULL WHERE display_name = 'Jane Doe'").execute(&pool).await.unwrap();
+        PeopleRepository::rename_meeting_speaker(&pool, "m1", "Speaker 2", "Bob Roe").await.unwrap();
+        assert_eq!(after_rename(&pool, "m1", "Bob Roe").await, 1);
+        assert_eq!(email_of(&pool, "Bob Roe").await.as_deref(), Some("bob@a.com"));
+        assert_eq!(email_of(&pool, "Jane Doe").await, None);
     }
 }

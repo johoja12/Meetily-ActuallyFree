@@ -73,8 +73,11 @@ char *meetily_calendar_read(bool requestAccess, const char *selectedJSON, double
                     // People only: not the user, rooms, resources, groups, or
                     // anyone who declined. Rust cleans names and emails.
                     NSMutableArray *people = [NSMutableArray array];
+                    // Read once and compare by value: EventKit may hand out a new
+                    // wrapper per access, and the organizer may also be listed.
+                    EKParticipant *organizer = event.organizer;
                     NSMutableArray *participants = [NSMutableArray arrayWithArray:event.attendees ?: @[]];
-                    if (event.organizer) [participants addObject:event.organizer];
+                    if (organizer && ![participants containsObject:organizer]) [participants addObject:organizer];
                     for (EKParticipant *person in participants) {
                         if (people.count >= 100) break;
                         if (person.isCurrentUser || person.participantStatus == EKParticipantStatusDeclined) continue;
@@ -84,7 +87,7 @@ char *meetily_calendar_read(bool requestAccess, const char *selectedJSON, double
                         [people addObject:@{
                             @"name": person.name ?: @"",
                             @"email": address ?: [NSNull null],
-                            @"organizer": @(person == event.organizer || person.participantRole == EKParticipantRoleChair)
+                            @"organizer": @([person isEqual:organizer] || person.participantRole == EKParticipantRoleChair)
                         }];
                     }
                     [meetings addObject:@{

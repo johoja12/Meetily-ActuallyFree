@@ -107,13 +107,32 @@ export function chooseLiveCalendarEvent(event: CalendarMeeting) {
 }
 
 /**
- * Undo an automatic calendar name: back to the automatic title, no event.
- * Does nothing (false) once the user has typed a title of their own.
+ * Undo the automatic calendar name for event `eventId`: back to the automatic
+ * title, no event. Refused once the user typed a title or chose another event
+ * ('renamed'), or after the recording ended ('ended').
  */
-export function undoCalendarTitle(automatic: string): boolean {
+export function undoCalendarTitle(automatic: string, eventId: string): 'undone' | 'renamed' | 'ended' {
   const live = readLiveTitle();
-  if (!live?.calendarEvent || live.title !== live.calendarEvent.title) return false;
+  if (!live) return 'ended';
+  if (live.calendarEvent?.id !== eventId || live.title !== live.calendarEvent.title) return 'renamed';
   writeLiveTitle({ ...live, title: automatic, manual: false, calendarEvent: null });
+  return 'undone';
+}
+
+/** "Not this invite": keep the title, stop offering the event's attendees. */
+export function clearLiveCalendarEvent() {
+  const live = readLiveTitle();
+  if (live) writeLiveTitle({ ...live, calendarEvent: null });
+}
+
+/**
+ * Links the live title's calendar event to the meeting just saved. Call before
+ * the live session is cleared. Returns false when there is no event.
+ */
+export async function linkLiveCalendarEvent(meetingId: string, call: (command: string, args: Record<string, unknown>) => Promise<unknown>): Promise<boolean> {
+  const event = readLiveTitle()?.calendarEvent;
+  if (!event) return false;
+  await call('link_meeting_calendar_event', { meetingId, event });
   return true;
 }
 

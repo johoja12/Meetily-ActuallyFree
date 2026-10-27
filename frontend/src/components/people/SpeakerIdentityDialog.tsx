@@ -20,7 +20,8 @@ import { Button } from '@/components/ui/button';
 import { useWorkspace } from '@/contexts/WorkspaceContext';
 import { useUserName } from '@/hooks/useUserName';
 import { useInviteAttendees } from '@/hooks/useInviteAttendees';
-import { inviteSuggestions } from '@/lib/calendar-attendees';
+import { inviteSuggestions, MEETING_CALENDAR_LINK_EVENT } from '@/lib/calendar-attendees';
+import { clearLiveCalendarEvent } from '@/lib/live-session';
 import { announceChange } from '@/lib/workspace-api';
 import { displaySpeaker, isUserSpeaker, speakerDot, splitSpeakerLabel } from '@/utils/speakerUtils';
 
@@ -130,6 +131,24 @@ export function SpeakerIdentityDialog({
     }
   };
 
+  // The meeting was linked to the wrong calendar event: stop offering its invitees.
+  const dropInvite = async () => {
+    if (saving) return;
+    setSaving(true);
+    try {
+      if (meetingId) {
+        await invoke('unlink_meeting_calendar_event', { meetingId });
+        window.dispatchEvent(new CustomEvent(MEETING_CALENDAR_LINK_EVENT, { detail: { meetingId } }));
+      } else {
+        clearLiveCalendarEvent();
+      }
+    } catch (error) {
+      toast.error('Could not remove the invite', { description: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setSaving(false);
+    }
+  };
+
   const merge = async (target: string) => {
     if (!speaker || !onMerge || saving) return;
     setSaving(true);
@@ -227,6 +246,10 @@ export function SpeakerIdentityDialog({
                     <CalendarDays className="text-af-text-4" />
                   </CommandItem>
                 ))}
+                <CommandItem value="invite __not-this-invite__" onSelect={() => void dropInvite()} disabled={saving}>
+                  <Unlink className="text-af-text-3" />
+                  <span className="flex-1 truncate text-af-text-3">Wrong meeting? Stop suggesting this invite</span>
+                </CommandItem>
               </CommandGroup>
             )}
             {contacts.length > 0 && (

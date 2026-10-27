@@ -30,7 +30,7 @@ const choices = (heading: string) => section(heading)?.findAllByType('button').m
 
 test('invitees come first, matched contacts leave the contact list, and picking one renames to that name', async () => {
   await act(async () => {root=create(<SpeakerIdentityDialog open onOpenChange={() => {}} speaker="Speaker 2" meetingId="m1" speakers={['Speaker 1', 'Speaker 2']}/>);});
-  expect(choices("In this meeting's invite")).toEqual(['invite Jane D. person:p-jane', 'invite Bob Roe email:bob@a.com']);
+  expect(choices("In this meeting's invite")).toEqual(['invite Jane D. person:p-jane', 'invite Bob Roe email:bob@a.com', 'invite __not-this-invite__']);
   expect(choices('Contacts')).toEqual(['Zed p-zed']);
   await act(async () => section("In this meeting's invite").findAllByType('button')[1].props.onClick());
   expect(calls).toEqual([['rename_meeting_speaker', {meetingId:'m1', from:'Speaker 2', to:'Bob Roe'}]]);
@@ -38,5 +38,12 @@ test('invitees come first, matched contacts leave the contact list, and picking 
 
 test('an invitee already used for another speaker sinks to the bottom', async () => {
   await act(async () => {root=create(<SpeakerIdentityDialog open onOpenChange={() => {}} speaker="Speaker 2" meetingId="m1" speakers={['Jane D.', 'Speaker 2']}/>);});
-  expect(choices("In this meeting's invite")).toEqual(['invite Bob Roe email:bob@a.com', 'invite Jane D. person:p-jane']);
+  expect(choices("In this meeting's invite")).toEqual(['invite Bob Roe email:bob@a.com', 'invite Jane D. person:p-jane', 'invite __not-this-invite__']);
+});
+
+test('the wrong invite can be removed from a saved meeting', async () => {
+  await act(async () => {root=create(<SpeakerIdentityDialog open onOpenChange={() => {}} speaker="Speaker 2" meetingId="m1" speakers={['Speaker 2']}/>);});
+  const remove = root.root.findAllByType('button').find(button => button.props['data-choice'] === 'invite __not-this-invite__')!;
+  await act(async () => remove.props.onClick());
+  expect(calls).toEqual([['unlink_meeting_calendar_event', {meetingId:'m1'}]]);
 });

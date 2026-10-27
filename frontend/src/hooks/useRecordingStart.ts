@@ -8,7 +8,7 @@ import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateCon
 import { recordingService } from '@/services/recordingService';
 import { readPendingGroup } from '@/lib/groups';
 import { autoCalendarChoice, OPEN_CALENDAR_TITLE_EVENT, takeCalendarRecording, type AutoCalendarChoice } from '@/lib/calendar-meetings';
-import { automaticTitle, beginLiveSession, undoCalendarTitle } from '@/lib/live-session';
+import { automaticTitle, beginLiveSession, readLiveTitle, undoCalendarTitle } from '@/lib/live-session';
 import type { CalendarSnapshot } from '@/hooks/useCalendar';
 import { AUTO_START_KEY, START_RECORDING_EVENT } from '@/lib/recording-launch';
 import { beginAutomatedRecording, endAutomatedRecording, takeAutomatedStart } from '@/lib/meeting-automation';
@@ -218,8 +218,12 @@ export function useRecordingStart(
           action: {
             label: 'Undo',
             onClick: () => {
-              if (undoCalendarTitle(automatic)) setMeetingTitle(automatic);
-              else toast.info('You already renamed this recording');
+              // Recomputed now: a group picked since the start names it.
+              const live = readLiveTitle();
+              const restored = automaticTitle(new Date(live?.startedAt ?? startedAt), readPendingGroup()?.name, meetings.map((meeting) => meeting.title));
+              const outcome = undoCalendarTitle(restored, choice.event.id);
+              if (outcome === 'undone') setMeetingTitle(restored);
+              else toast.info(outcome === 'ended' ? 'The recording has ended. Rename it from the meeting page.' : 'This recording was already renamed');
             },
           },
           cancel: { label: 'Choose another', onClick: openCalendarTitles },

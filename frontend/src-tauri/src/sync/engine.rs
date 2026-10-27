@@ -792,7 +792,7 @@ mod tests {
         b.sync(&library).await;
         assert_eq!(b.text("SELECT event_id FROM meeting_calendar_events").await, vec!["e1".to_string()]);
         assert_eq!(a.synced_rows().await, b.synced_rows().await);
-        b.sql("DELETE FROM meeting_calendar_events; DELETE FROM transcripts; DELETE FROM meetings;").await;
+        assert!(crate::database::repositories::meeting::MeetingsRepository::delete_meeting(&b.pool, "m1").await.unwrap());
         b.sync(&library).await;
         a.sync(&library).await;
         assert!(a.text("SELECT event_id FROM meeting_calendar_events").await.is_empty());

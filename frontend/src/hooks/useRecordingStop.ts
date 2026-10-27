@@ -13,7 +13,7 @@ import {
   applyPinnedSummaryLanguageToMeeting,
   detectAndCacheSummaryLanguage,
 } from '@/lib/summary-language-preferences';
-import { endLiveSession, finalLiveTitle, readLiveTitle, readLiveNotes, writeLiveTitle } from '@/lib/live-session';
+import { endLiveSession, finalLiveTitle, linkLiveCalendarEvent, readLiveTitle, readLiveNotes, writeLiveTitle } from '@/lib/live-session';
 import { announceChange, saveMeetingNotes } from '@/lib/workspace-api';
 import { endAutomatedRecording } from '@/lib/meeting-automation';
 
@@ -294,14 +294,10 @@ export function useRecordingStop(
             // The calendar event the recording was named from, so the
             // speaker picker can offer its attendees. Best effort: "Suggest
             // name" on the meeting links it again.
-            const calendarEvent = readLiveTitle()?.calendarEvent;
-            if (calendarEvent) {
-              try {
-                await invoke('link_meeting_calendar_event', { meetingId, event: calendarEvent });
-                announceChange('people');
-              } catch (error) {
-                console.warn('Could not link this meeting to its calendar event', error);
-              }
+            try {
+              if (await linkLiveCalendarEvent(meetingId, invoke)) announceChange('people');
+            } catch (error) {
+              console.warn('Could not link this meeting to its calendar event', error);
             }
             // Notes typed during the call become the meeting's notes. If that
             // fails they stay in the draft rather than being dropped.
