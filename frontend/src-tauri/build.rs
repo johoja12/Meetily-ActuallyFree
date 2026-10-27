@@ -2,6 +2,8 @@
 mod ffmpeg;
 #[path = "build/onnxruntime.rs"]
 mod onnxruntime;
+#[path = "build/dtln_aec.rs"]
+mod dtln_aec;
 
 fn main() {
     // GPU Acceleration Detection and Build Guidance
@@ -27,6 +29,7 @@ fn main() {
     // Download and bundle FFmpeg binary at build-time
     ffmpeg::ensure_ffmpeg_binary();
     onnxruntime::ensure_onnxruntime_runtime();
+    dtln_aec::ensure_dtln_models();
 
     tauri_build::build()
 }

@@ -44,7 +44,7 @@ pub struct IncrementalAudioSaver {
     checkpoints_dir: PathBuf,
     meeting_folder: PathBuf,
     sample_rate: u32,
-    /// Basename without extension: "audio" | "mic" | "system"
+    /// Basename without extension: "audio" | "mic" | "system" | "mic_raw"
     track: String,
 }
 
