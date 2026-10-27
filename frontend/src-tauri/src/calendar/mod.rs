@@ -1,5 +1,6 @@
 //! Opt-in local calendar reading. A single bounded worker owns EventKit calls;
 //! reminders are user prompts, never authority to start or stop capture.
+pub mod attendees;
 pub mod saved;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -44,6 +45,9 @@ pub struct CalendarMeeting {
     pub start_ms: i64,
     pub end_ms: i64,
     pub is_meeting: bool,
+    /// Everyone invited except the user, rooms and people who declined.
+    #[serde(default)]
+    pub attendees: Vec<attendees::CalendarAttendee>,
 }
 impl CalendarMeeting {
     fn valid(&self) -> bool {
@@ -213,10 +217,15 @@ fn read_platform(
         if value.is_null() {
             return Err("macOS returned no calendar data".into());
         }
-        let result = serde_json::from_slice(CStr::from_ptr(value).to_bytes())
+        let result: Result<ReadResult, String> = serde_json::from_slice(CStr::from_ptr(value).to_bytes())
             .map_err(|_| "macOS returned invalid calendar data".into());
         meetily_calendar_free(value);
-        result
+        result.map(|mut read| {
+            for event in &mut read.events {
+                event.attendees = attendees::normalize(std::mem::take(&mut event.attendees));
+            }
+            read
+        })
     }
 }
 #[cfg(not(target_os = "macos"))]
@@ -461,7 +470,16 @@ mod tests {
             start_ms: 1_000_000,
             end_ms: 4_600_000,
             is_meeting: true,
+            attendees: vec![],
         }
+    }
+    #[test]
+    fn events_without_attendees_still_parse() {
+        let read: ReadResult = serde_json::from_str(
+            r#"{"authorization":"authorized","events":[{"id":"e","title":"T","calendar_id":"c","calendar_name":"C","start_ms":1,"end_ms":2,"is_meeting":true}]}"#,
+        )
+        .unwrap();
+        assert!(read.events[0].attendees.is_empty());
     }
     #[test]
     fn calendar_prompts_are_bounded_and_require_a_meeting() {

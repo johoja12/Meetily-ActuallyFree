@@ -70,13 +70,31 @@ char *meetily_calendar_read(bool requestAccess, const char *selectedJSON, double
                     for (NSString *host in @[@"webex.com", @"zoom.us", @"teams.microsoft.com", @"teams.live.com", @"meet.google.com"]) {
                         if ([links containsString:host]) meeting = YES;
                     }
+                    // People only: not the user, rooms, resources, groups, or
+                    // anyone who declined. Rust cleans names and emails.
+                    NSMutableArray *people = [NSMutableArray array];
+                    NSMutableArray *participants = [NSMutableArray arrayWithArray:event.attendees ?: @[]];
+                    if (event.organizer) [participants addObject:event.organizer];
+                    for (EKParticipant *person in participants) {
+                        if (people.count >= 100) break;
+                        if (person.isCurrentUser || person.participantStatus == EKParticipantStatusDeclined) continue;
+                        if (person.participantType == EKParticipantTypeRoom || person.participantType == EKParticipantTypeResource ||
+                            person.participantType == EKParticipantTypeGroup) continue;
+                        NSString *address = [person.URL.scheme.lowercaseString isEqualToString:@"mailto"] ? person.URL.resourceSpecifier : nil;
+                        [people addObject:@{
+                            @"name": person.name ?: @"",
+                            @"email": address ?: [NSNull null],
+                            @"organizer": @(person == event.organizer || person.participantRole == EKParticipantRoleChair)
+                        }];
+                    }
                     [meetings addObject:@{
                         @"id": event.eventIdentifier, @"title": title,
                         @"calendar_id": event.calendar.calendarIdentifier,
                         @"calendar_name": event.calendar.title ?: @"Calendar",
                         @"start_ms": @((long long)(event.startDate.timeIntervalSince1970 * 1000)),
                         @"end_ms": @((long long)(event.endDate.timeIntervalSince1970 * 1000)),
-                        @"is_meeting": @(meeting)
+                        @"is_meeting": @(meeting),
+                        @"attendees": people
                     }];
                 }
             }

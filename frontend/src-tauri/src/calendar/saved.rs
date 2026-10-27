@@ -164,6 +164,7 @@ mod tests {
             start_ms: start,
             end_ms: end,
             is_meeting: true,
+            attendees: vec![],
         }
     }
     #[test]
