@@ -42,3 +42,13 @@ test('malformed dates, empty titles, corrupt storage and ended selections are re
   selectCalendarRecording(meeting('ended', -10, 1), now);
   assert.equal(takeCalendarRecording(now + 2 * 60_000), null);
 });
+
+test('only one current meeting is applied automatically; several ask; plain events never apply', async () => {
+  const { autoCalendarChoice } = await import('../../src/lib/calendar-meetings');
+  const one = meeting('one', -5, 25);
+  const focus = { ...meeting('focus', -10, 50), is_meeting: false };
+  assert.deepEqual(autoCalendarChoice([one, focus, meeting('ended', -30, 0)], now), { kind: 'one', event: one });
+  assert.deepEqual(autoCalendarChoice([one, meeting('two', 10, 40)], now), { kind: 'many', count: 2 });
+  assert.equal(autoCalendarChoice([focus], now), null);
+  assert.equal(autoCalendarChoice([], now), null);
+});

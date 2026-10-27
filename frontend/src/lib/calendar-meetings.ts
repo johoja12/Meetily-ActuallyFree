@@ -1,3 +1,5 @@
+import type { CalendarAttendee } from '@/lib/calendar-attendees';
+
 /** Calendar data stays out of transcripts until the user chooses a title. */
 export interface CalendarMeeting {
   id: string;
@@ -7,6 +9,8 @@ export interface CalendarMeeting {
   start_ms: number;
   end_ms: number;
   is_meeting: boolean;
+  /** Everyone invited except the user, rooms and people who declined. */
+  attendees?: CalendarAttendee[];
 }
 
 const PENDING_KEY = 'af-calendar-recording-title';
@@ -49,3 +53,19 @@ export function takeCalendarRecording(now = Date.now()): CalendarMeeting | null 
     return calendarTitleSuggestions([event], now).length === 1 ? event : null;
   } catch { return null; }
 }
+
+export type AutoCalendarChoice = { kind: 'one'; event: CalendarMeeting } | { kind: 'many'; count: number } | null;
+
+/**
+ * What a new recording does with the calendar: one current meeting names it,
+ * several are offered as a choice. Plain events (no attendees or meeting link,
+ * such as focus time) never name a recording on their own.
+ */
+export function autoCalendarChoice(events: CalendarMeeting[], now: number): AutoCalendarChoice {
+  const meetings = calendarTitleSuggestions(events.filter(event => event.is_meeting), now);
+  if (meetings.length === 1) return { kind: 'one', event: meetings[0] };
+  return meetings.length > 1 ? { kind: 'many', count: meetings.length } : null;
+}
+
+/** Asks the recording header to open its Calendar title menu. */
+export const OPEN_CALENDAR_TITLE_EVENT = 'af-open-calendar-title';
