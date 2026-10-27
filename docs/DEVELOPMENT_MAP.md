@@ -187,6 +187,10 @@ title choices, saved-recording historical matches (`calendar/saved.rs` and
 `SavedCalendarTitleSuggestions` in the meeting header), privacy/permission boundary,
 and native title ownership on save. Historical reads never feed recording prompts.
 Calendar prompts require a user click; they never start or stop recording by time.
+At record start one current calendar meeting names the recording (Undo in the
+toast); the chosen event is linked to the saved meeting (`calendar/link.rs`,
+`meeting_calendar_events`, synced) and its attendees lead the speaker picker
+(`lib/calendar-attendees.ts`, `useInviteAttendees`, `SpeakerIdentityDialog`).
 
 ## 3. Post-call processing and model selection
 

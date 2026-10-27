@@ -12,7 +12,7 @@ then chooses calendars; an empty selection reads no events. Title suggestions
 and recording reminders have separate switches. The idle recording screen lists
 current/soon events with explicit Record actions. During a recording, Calendar
 title opens event choices matched to the recording's start. Overlaps remain
-choices; neither timing nor an attendee name establishes which call is attended.
+choices; timing alone never picks between overlapping meetings.
 
 A confirmed Record action rechecks native capture state, hands the selected title
 to the existing recorder, and starts through the usual model/capture checks. A
@@ -35,6 +35,46 @@ start is the import time. Legacy recordings without metadata use the database's
 saved date, which may be approximate. Only events still available in selected
 synced calendars can be matched; this cannot recover deleted calendar history.
 
+## Automatic names and invite attendees
+
+Design: [superpowers/specs/2026-10-27-calendar-attendees-design.md](superpowers/specs/2026-10-27-calendar-attendees-design.md).
+
+**At record start** (`useRecordingStart`), when no reminder chose an event and no
+group is pending, the hook reads `calendar_snapshot` (the cache; no new query)
+and `autoCalendarChoice` (`lib/calendar-meetings.ts`) looks at current/soon
+events that are meetings (`is_meeting`). Exactly one names the recording (a
+manual title) and a toast offers **Undo** (`undoCalendarTitle`: back to the
+automatic title, event dropped, only while the calendar title still stands) and
+**Choose another**. Several leave the automatic title and offer **Choose**. Both
+open the header menu through the `af-open-calendar-title` window event. Solo
+events (no attendees, no meeting link) never name a recording automatically.
+
+**The link.** The live title (`lib/live-session.ts`, sessionStorage) carries
+`calendarEvent`; typing a title keeps it (`renameLiveTitle`), the header menu
+replaces it (`chooseLiveCalendarEvent`). After `api_save_transcript`,
+`useRecordingStop` calls `link_meeting_calendar_event`. "Suggest name" on a saved
+meeting links the chosen event after its rename succeeds. `calendar/link.rs`
+stores one row per meeting in `meeting_calendar_events` (event id, title,
+start/end ms, attendees JSON); a new choice replaces it, the meeting delete removes
+it explicitly, and library sync carries it as a meeting-scoped table.
+
+**Attendees.** `macos.m` returns `{name, email, organizer}` for each attendee plus
+the organizer, leaving out the user, rooms/resources/groups and people who
+declined (≤100). `calendar/attendees.rs` normalizes them on every read: emails
+from `mailto:`, lowercased; a missing or email-shaped name comes from the email
+(`jane.doe+x@a.com` → "Jane Doe"); duplicates merge by email, else name.
+
+**Speaker picker.** `useInviteAttendees` loads the link
+(`get_meeting_calendar_event`, refreshed by `af-meeting-calendar-link`) or reads
+the live title. `inviteSuggestions` (`lib/calendar-attendees.ts`) matches each
+attendee to a contact by email, then name, and puts attendees already used for a
+speaker last. `SpeakerIdentityDialog` shows them under "In this meeting's invite"
+above Contacts (matched contacts are not repeated). Picking one goes through the
+ordinary rename, which creates the contact; then `fill_attendee_emails` (after
+linking and after `rename_meeting_speaker` / `reassign_transcript_speaker`) gives a
+tagged contact without an email the invite's address when exactly one attendee
+has that name and no other contact uses it.
+
 ## Native ownership and privacy
 
 `calendar/mod.rs` owns settings, the memory-only event cache, permission completion,
@@ -46,6 +86,11 @@ Unix seconds for its NSDate query boundaries; it returns an owned UTF-8 allocati
 that Rust always frees. Calendar sources/events do not enter telemetry or logs.
 Notes/location are inspected only locally for a meeting-link signal; they are not
 returned to JavaScript, persisted, or sent to a model.
+Attendee names and emails are returned to the window with events. They are
+persisted only for a meeting whose title came from that event
+(`meeting_calendar_events`, local database, and the library sync folder when sync
+is on) and may become a contact's email. They are never sent to a model or
+service.
 
 `calendar_settings.json` stores only switches and selected calendar identifiers.
 Connection activation is persisted by native completion after permission succeeds,
@@ -88,6 +133,18 @@ calendar prompts. Recording start uses a one-use, ten-minute calendar selection
 in sessionStorage. Invalid/stale selections fall back to normal title behavior.
 
 ## Verification and remaining limits
+
+Invite attendees (October 27): native tests cover attendee normalization
+(`calendar::attendees`), link/get/replace/unlink, refusal of invalid events and
+missing meetings, removal with the meeting with foreign keys off, email filling
+(single match, shared name, existing email, address used by another contact) and
+a two-device sync round trip with delete. Frontend tests cover `autoCalendarChoice`,
+the live title keeping its event and Undo, `inviteSuggestions` matching/order/
+dedupe, the picker section and rename, and Choose opening the header menu.
+`useRecordingStart`'s toast wiring has no hook-level test. EventKit attendee
+fields (names, `mailto:` URLs, room types, organizer) are unverified against a real
+account. A recording recovered after a crash loses the live link; Suggest name
+links it again. Attendees are a snapshot from when the meeting was linked.
 
 Native regressions cover reminder windows, exclusions for non-meetings, recurrence
 keys, overlaps, deduplication, in-progress recording suppression, bounded queues,
