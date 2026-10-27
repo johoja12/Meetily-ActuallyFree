@@ -11,6 +11,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { useConfig } from "@/contexts/ConfigContext";
 import { usePaginatedTranscripts } from "@/hooks/usePaginatedTranscripts";
 import { shouldSetUpAutoSummary } from "@/lib/meeting-summary-policy";
+import { onWorkspaceChange } from "@/lib/workspace-api";
 
 interface MeetingDetailsResponse {
   id: string;
@@ -167,6 +168,16 @@ function MeetingDetailsContent() {
       setError(transcriptError);
     }
   }, [transcriptError]);
+
+  // Library sync changed this meeting on disk or from another computer (for
+  // example moved its recording into the shared folder): reload it so the
+  // folder path used for playback and post-call processing is current.
+  useEffect(() => {
+    if (!meetingId || meetingId === 'intro-call') return;
+    return onWorkspaceChange(['meetings'], (detail) => {
+      if (detail.source === 'sync' && detail.meetingId === meetingId) void refetch();
+    });
+  }, [meetingId, refetch]);
 
   // Extract fetchMeetingDetails for use in child components (now refetches via hook)
   const fetchMeetingDetails = useCallback(async () => {

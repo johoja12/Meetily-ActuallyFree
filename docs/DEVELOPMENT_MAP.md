@@ -216,7 +216,13 @@ navigation by `frontend/src/contexts/PostCallJobsContext.tsx`. The page's
 `PostCallProcessingDialog.tsx` registers/detaches only its view. Completion and
 transcript refresh target the matching mounted meeting; inactive meetings refresh
 on return. See [OCTOBER_PR_INTEGRATION.md](OCTOBER_PR_INTEGRATION.md) for cancellation
-ownership and lifecycle limits. Related
+ownership and lifecycle limits. "Identify speakers automatically after each
+recording" (Settings > Transcription > Speaker Identification, or the card's
+checkbox; `lib/post-call-preferences.ts`, per computer) makes the worker run once
+per meeting as if Auto-detect & continue were clicked; a failure stops at the
+error card. `start_retranscription_command` resolves the meeting's current folder
+from the database (`current_meeting_folder`), because library sync can move a
+finished recording while the card waits. Related
 speaker/retranscription dialogs. `useDiarizationEngine.ts` refreshes selected-engine
 state for dialogs, including native activation events and stale-response guards.
 
@@ -325,6 +331,14 @@ uses `tauri.updater.conf.json` so CI emits the updater `.sig`; its NSIS toolset 
 provisioned by `build-nsis-progress-plugin.ps1` with tauri-bundler's pinned URLs
 and SHA-1s, because the bundler recreates an incomplete toolset and would drop the
 progress plugin.
+
+### Logs
+
+`src-tauri/src/logging.rs` (started from `main.rs`) writes every log line to
+stderr and to `~/Library/Logs/Meetily/meetily.log` on macOS (`logs/` in the
+app data folder elsewhere), so a copy opened from Finder still leaves a log.
+The file is capped at 10 MB, then moves to `meetily.1.log`. Lines can name
+meetings and devices; the file stays local and is never part of the repo.
 
 ## 6. Tests, qualification, and historical notes
 

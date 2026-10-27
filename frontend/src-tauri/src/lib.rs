@@ -65,6 +65,7 @@ pub mod paths;
 pub mod state;
 pub mod summary;
 pub mod sync;
+pub mod logging;
 pub mod tray;
 pub mod utils;
 pub mod whisper_engine;
@@ -268,7 +269,8 @@ fn get_transcription_status() -> TranscriptionStatus {
 
 #[tauri::command]
 fn read_audio_file(file_path: String) -> Result<Vec<u8>, String> {
-    match std::fs::read(&file_path) {
+    // Library sync may have moved the recording since the window read its path.
+    match std::fs::read(sync::relocate::follow_moves(std::path::Path::new(&file_path))) {
         Ok(data) => Ok(data),
         Err(e) => Err(format!("Failed to read audio file: {}", e)),
     }

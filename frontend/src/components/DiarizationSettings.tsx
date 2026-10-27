@@ -18,6 +18,8 @@ import {
 } from "lucide-react"
 import { Button } from "./ui/button"
 import { OPTIONAL_MODEL_PREFERENCES_CHANGED } from '@/lib/optional-model-activation';
+import { Switch } from '@/components/ui/switch';
+import { AUTO_IDENTIFY_CHANGED_EVENT, readAutoIdentifySpeakers, writeAutoIdentifySpeakers } from '@/lib/post-call-preferences';
 import { useOptionalModelDownloads } from '@/contexts/OptionalModelDownloadsContext';
 
 interface DownloadProgress {
@@ -63,6 +65,13 @@ export function DiarizationSettings() {
   const isDownloading = isPyannoteDownloading || isNemotronDownloading || nemotronJob.status === 'uninstalling';
   const [progress, setProgress] = useState<DownloadProgress | null>(null);
   const [isSwitching, setIsSwitching] = useState(false);
+  const [autoIdentify, setAutoIdentify] = useState(false);
+  useEffect(() => {
+    const read = () => setAutoIdentify(readAutoIdentifySpeakers());
+    read();
+    window.addEventListener(AUTO_IDENTIFY_CHANGED_EVENT, read);
+    return () => window.removeEventListener(AUTO_IDENTIFY_CHANGED_EVENT, read);
+  }, []);
   const unlistenRef = useRef<UnlistenFn | null>(null);
   const statusRevision = useRef(0);
 
@@ -226,6 +235,20 @@ export function DiarizationSettings() {
           </span>
         )}
       </div>
+
+      <label className="mb-4 flex items-start justify-between gap-4 rounded-xl border border-af-border bg-af-panel px-4 py-3">
+        <span className="min-w-0">
+          <span className="block text-sm font-medium text-af-text">Identify speakers automatically after each recording</span>
+          <span className="mt-0.5 block text-xs text-af-text-3">
+            Skips the question after a recording and runs it as if you clicked Auto-detect, detecting how many people spoke.
+          </span>
+        </span>
+        <Switch
+          checked={autoIdentify}
+          onCheckedChange={(value) => writeAutoIdentifySpeakers(value)}
+          aria-label="Identify speakers automatically after each recording"
+        />
+      </label>
 
       {/* Engine Selection: Pyannote vs Nemotron-3 */}
       <div className="mt-4 mb-5">

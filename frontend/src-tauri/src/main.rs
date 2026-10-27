@@ -4,7 +4,6 @@
 )]
 
 use log;
-use env_logger;
 
 fn main() {
     // A short-lived copy of the app reports TCC's uncached Audio Capture status
@@ -15,7 +14,9 @@ fn main() {
     }
 
     std::env::set_var("RUST_LOG", "info");
-    env_logger::init();
+    // stderr plus ~/Library/Logs/Meetily/meetily.log (capped), so a copy
+    // opened from Finder still leaves a log to read.
+    app_lib::logging::init();
 
     // Async logger will be initialized lazily when first needed (after Tauri runtime starts)
     log::info!("Starting application...");

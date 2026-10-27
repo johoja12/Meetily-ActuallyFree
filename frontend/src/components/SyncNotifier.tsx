@@ -23,8 +23,10 @@ export function SyncNotifier() {
         announceChange('notes');
         announceChange('actions');
         announceVoiceMatchChanges(payload.meeting_ids);
-        // An open speaker picker reloads the meeting's calendar invite.
         for (const meetingId of payload.meeting_ids) {
+          // An open meeting page reloads its details (a moved recording's folder).
+          announceChange('meetings', { meetingId, source: 'sync' });
+          // An open speaker picker reloads the meeting's calendar invite.
           window.dispatchEvent(new CustomEvent(MEETING_CALENDAR_LINK_EVENT, { detail: { meetingId } }));
         }
       }
