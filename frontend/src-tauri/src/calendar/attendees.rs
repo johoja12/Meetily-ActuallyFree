@@ -14,10 +14,30 @@ pub struct CalendarAttendee {
     pub organizer: bool,
 }
 
+/// `mailto:` URLs escape characters such as "+" (`%2B`). Invalid escapes stay.
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let hex = |byte: u8| (byte as char).to_digit(16).map(|digit| digit as u8);
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let (Some(high), Some(low)) = (hex(bytes[index + 1]), hex(bytes[index + 2])) {
+                out.push(high * 16 + low);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| value.to_string())
+}
+
 fn clean_email(raw: &str) -> Option<String> {
     let value = raw.trim();
     let value = value.strip_prefix("mailto:").or_else(|| value.strip_prefix("MAILTO:")).unwrap_or(value);
-    let value = value.trim().to_lowercase();
+    let value = percent_decode(value.trim()).trim().to_lowercase();
     let (local, domain) = value.split_once('@')?;
     let plain = !local.is_empty() && !domain.is_empty() && !domain.contains('@') && !value.chars().any(char::is_whitespace);
     (plain && value.chars().count() <= MAX_FIELD).then_some(value)
@@ -127,6 +147,14 @@ mod tests {
         assert_eq!(cleaned[0].name, "Jane");
         assert!(cleaned[0].organizer);
         assert_eq!(cleaned[1].name, "Ann Lee");
+    }
+
+    #[test]
+    fn percent_encoded_mailto_addresses_are_decoded() {
+        let cleaned = normalize(vec![person("", Some("mailto:jane.doe%2Bwork@a.com")), person("Bad", Some("mailto:x%ZZ@a.com"))]);
+        assert_eq!(cleaned[0].email.as_deref(), Some("jane.doe+work@a.com"));
+        assert_eq!(cleaned[0].name, "Jane Doe");
+        assert_eq!(cleaned[1].email.as_deref(), Some("x%zz@a.com"));
     }
 
     #[test]

@@ -8,6 +8,12 @@ use super::attendees::{self, CalendarAttendee};
 use super::CalendarMeeting;
 use crate::database::repositories::person::normalize_person_name;
 
+/// Contact names are stored trimmed and lowercased but keep inner spacing;
+/// invite names are collapsed. Compare both collapsed.
+fn name_key(name: &str) -> String {
+    normalize_person_name(name).split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeetingCalendarLink {
@@ -98,13 +104,11 @@ async fn fill_emails(pool: &SqlitePool, meeting_id: &str, only: Option<&[String]
     .await?;
     let mut changed = 0;
     for (person_id, normalized) in tagged {
+        let normalized = name_key(&normalized);
         if only.is_some_and(|names| !names.contains(&normalized)) {
             continue;
         }
-        let mut matching = linked
-            .attendees
-            .iter()
-            .filter(|attendee| normalize_person_name(&attendee.name) == normalized);
+        let mut matching = linked.attendees.iter().filter(|attendee| name_key(&attendee.name) == normalized);
         let (Some(only), None) = (matching.next(), matching.next()) else { continue };
         let Some(email) = only.email.as_deref() else { continue };
         let updated = sqlx::query(
@@ -127,7 +131,7 @@ async fn fill_emails(pool: &SqlitePool, meeting_id: &str, only: Option<&[String]
 /// email of only those contacts, so an email the user cleared on someone else
 /// is not refilled by an unrelated rename. Returns how many contacts changed.
 pub async fn after_rename(pool: &SqlitePool, meeting_id: &str, to: &str) -> u64 {
-    let names: Vec<String> = to.split(" + ").map(normalize_person_name).filter(|name| !name.is_empty()).collect();
+    let names: Vec<String> = to.split(" + ").map(name_key).filter(|name| !name.is_empty()).collect();
     if names.is_empty() {
         return 0;
     }
@@ -257,6 +261,14 @@ mod tests {
         assert_eq!(email_of(&pool, "Jane Doe").await.as_deref(), Some("jane@a.com"));
         // Two invitees share the name: no guess.
         assert_eq!(email_of(&pool, "Ann Lee").await, None);
+    }
+
+    #[tokio::test]
+    async fn names_match_regardless_of_extra_spaces() {
+        let pool = pool_with_meeting().await;
+        PeopleRepository::rename_meeting_speaker(&pool, "m1", "Speaker 1", "Ann  Lee").await.unwrap();
+        link(&pool, "m1", event("a", vec![attendee("Ann Lee", "ann@a.com")])).await.unwrap();
+        assert_eq!(email_of(&pool, "Ann  Lee").await.as_deref(), Some("ann@a.com"));
     }
 
     #[tokio::test]

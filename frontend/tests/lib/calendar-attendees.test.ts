@@ -27,3 +27,11 @@ test('duplicate and nameless attendees are dropped', () => {
   const result = inviteSuggestions([attendee('Bob Roe', 'bob@a.com'), attendee('Robert', 'BOB@a.com'), attendee('  '), attendee('Bob Roe')], [], []);
   assert.deepEqual(result.map(entry => entry.name), ['Bob Roe']);
 });
+
+test('a same-name contact with a different email is not the attendee', () => {
+  const result = inviteSuggestions([attendee('Ann Lee', 'ann@other.com'), attendee('Jane D.', 'jane@a.com')],
+    [{ id: 'p-ann', displayName: 'Ann Lee', email: 'ann@a.com' }, { id: 'p-jane', displayName: 'Jane D.', email: 'jane@a.com' }, { id: 'p-noemail', displayName: 'Bob', email: null }], []);
+  assert.deepEqual(result.map(entry => [entry.name, entry.personId ?? null]), [['Ann Lee', null], ['Jane D.', 'p-jane']]);
+  // A contact with no email still matches by name.
+  assert.equal(inviteSuggestions([attendee('Bob', 'bob@a.com')], [{ id: 'p-noemail', displayName: 'Bob', email: null }], [])[0].personId, 'p-noemail');
+});

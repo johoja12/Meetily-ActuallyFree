@@ -54,6 +54,8 @@ export function takeCalendarRecording(now = Date.now()): CalendarMeeting | null 
   } catch { return null; }
 }
 
+const AUTO_LEAD_MS = 5 * 60_000;
+
 export type AutoCalendarChoice = { kind: 'one'; event: CalendarMeeting } | { kind: 'many'; count: number } | null;
 
 /**
@@ -62,10 +64,35 @@ export type AutoCalendarChoice = { kind: 'one'; event: CalendarMeeting } | { kin
  * such as focus time) never name a recording on their own.
  */
 export function autoCalendarChoice(events: CalendarMeeting[], now: number): AutoCalendarChoice {
-  const meetings = calendarTitleSuggestions(events.filter(event => event.is_meeting), now);
+  // The menu offers meetings up to 15 minutes ahead; naming without asking
+  // needs one that started or starts within 5.
+  const meetings = calendarTitleSuggestions(events.filter(event => event.is_meeting && event.start_ms <= now + AUTO_LEAD_MS), now);
   if (meetings.length === 1) return { kind: 'one', event: meetings[0] };
   return meetings.length > 1 ? { kind: 'many', count: meetings.length } : null;
 }
 
 /** Asks the recording header to open its Calendar title menu. */
 export const OPEN_CALENDAR_TITLE_EVENT = 'af-open-calendar-title';
+const OPEN_MENU_KEY = 'af-open-calendar-title';
+const OPEN_MENU_MAX_AGE_MS = 2 * 60_000;
+
+/**
+ * Opens the recording header's Calendar title menu: right away on the recorder,
+ * otherwise after navigating there (the menu takes the request when it mounts).
+ */
+export function requestCalendarTitleMenu(navigate: (href: string) => void, now = Date.now()) {
+  if (window.location.pathname === '/') {
+    window.dispatchEvent(new CustomEvent(OPEN_CALENDAR_TITLE_EVENT));
+    return;
+  }
+  try { sessionStorage.setItem(OPEN_MENU_KEY, String(now)); } catch { /* The menu stays one click away. */ }
+  navigate('/');
+}
+
+/** A pending request from another page, taken once and only while recent. */
+export function takeCalendarTitleMenuRequest(now = Date.now()): boolean {
+  let raw: string | null = null;
+  try { raw = sessionStorage.getItem(OPEN_MENU_KEY); sessionStorage.removeItem(OPEN_MENU_KEY); } catch { return false; }
+  const at = Number(raw);
+  return !!raw && Number.isFinite(at) && Math.abs(now - at) <= OPEN_MENU_MAX_AGE_MS;
+}

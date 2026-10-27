@@ -7,7 +7,8 @@ import { useConfig } from '@/contexts/ConfigContext';
 import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateContext';
 import { recordingService } from '@/services/recordingService';
 import { readPendingGroup } from '@/lib/groups';
-import { autoCalendarChoice, OPEN_CALENDAR_TITLE_EVENT, takeCalendarRecording, type AutoCalendarChoice } from '@/lib/calendar-meetings';
+import { autoCalendarChoice, requestCalendarTitleMenu, takeCalendarRecording, type AutoCalendarChoice } from '@/lib/calendar-meetings';
+import { useRouter } from 'next/navigation';
 import { automaticTitle, beginLiveSession, readLiveTitle, undoCalendarTitle } from '@/lib/live-session';
 import type { CalendarSnapshot } from '@/hooks/useCalendar';
 import { AUTO_START_KEY, START_RECORDING_EVENT } from '@/lib/recording-launch';
@@ -35,8 +36,6 @@ async function currentCalendarChoice(now: number): Promise<AutoCalendarChoice> {
   }
 }
 
-const openCalendarTitles = () => window.dispatchEvent(new CustomEvent(OPEN_CALENDAR_TITLE_EVENT));
-
 /**
  * Starts recordings, from the record button, from the sidebar or a group
  * (auto-start after navigating here), and from the tray or a detected
@@ -51,6 +50,8 @@ export function useRecordingStart(
   showModal?: (name: 'modelSelector', message?: string) => void
 ): UseRecordingStartReturn {
   const [isAutoStarting, setIsAutoStarting] = useState(false);
+  const router = useRouter();
+  const openCalendarTitles = () => requestCalendarTitleMenu((href) => router.push(href));
   const runtimeErrorRef = useRef<string | null>(null);
 
   const { clearTranscripts, setMeetingTitle } = useTranscripts();

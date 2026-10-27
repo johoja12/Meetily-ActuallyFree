@@ -5,7 +5,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { CalendarDays } from 'lucide-react';
 import { toast } from 'sonner';
 import { useCalendar } from '@/hooks/useCalendar';
-import { calendarTitleSuggestions, OPEN_CALENDAR_TITLE_EVENT, selectCalendarRecording, type CalendarMeeting } from '@/lib/calendar-meetings';
+import { calendarTitleSuggestions, OPEN_CALENDAR_TITLE_EVENT, selectCalendarRecording, takeCalendarTitleMenuRequest, type CalendarMeeting } from '@/lib/calendar-meetings';
 import { launchRecording } from '@/lib/recording-launch';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
@@ -58,6 +58,8 @@ export function CalendarTitleSuggestions({ startedAt, onSelect, disabled = false
   // "Choose" on the record-start toast opens this menu.
   useEffect(() => {
     const show = () => setOpen(true);
+    // Choose was clicked on another page, which brought the user here.
+    if (takeCalendarTitleMenuRequest()) show();
     window.addEventListener(OPEN_CALENDAR_TITLE_EVENT, show);
     return () => window.removeEventListener(OPEN_CALENDAR_TITLE_EVENT, show);
   }, []);

@@ -47,7 +47,9 @@ export function inviteSuggestions(attendees: CalendarAttendee[], people: Contact
     const attendeeName = attendee.name.trim().replace(/\s+/g, ' ');
     if (!attendeeName) continue;
     const person = (email && people.find(candidate => emailKey(candidate.email) === email))
-      || people.find(candidate => nameKey(candidate.displayName) === nameKey(attendeeName));
+      // Same name but a different address is someone else.
+      || people.find(candidate => nameKey(candidate.displayName) === nameKey(attendeeName)
+        && !(email && emailKey(candidate.email) && emailKey(candidate.email) !== email));
     const name = person?.displayName ?? attendeeName;
     const key = person ? `person:${person.id}` : email ? `email:${email}` : `name:${nameKey(name)}`;
     // A name-only entry repeating someone already listed is the same person.

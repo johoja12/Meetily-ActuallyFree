@@ -41,13 +41,16 @@ Design: [superpowers/specs/2026-10-27-calendar-attendees-design.md](superpowers/
 
 **At record start** (`useRecordingStart`), when no reminder chose an event and no
 group is pending, the hook reads `calendar_snapshot` (the cache; no new query)
-and `autoCalendarChoice` (`lib/calendar-meetings.ts`) looks at current/soon
-events that are meetings (`is_meeting`). Exactly one names the recording (a
+and `autoCalendarChoice` (`lib/calendar-meetings.ts`) looks at meetings
+(`is_meeting`) that have started or start within 5 minutes (the menu still
+offers 15). Exactly one names the recording (a
 manual title) and a toast offers **Undo** (`undoCalendarTitle`: back to the
 automatic title, recomputed at click time so a group chosen since applies, and
 event dropped; refused once another title or event was chosen, or after Stop) and
 **Choose another**. Several leave the automatic title and offer **Choose**. Both
-open the header menu through the `af-open-calendar-title` window event. Solo
+open the header menu (`requestCalendarTitleMenu`): through the
+`af-open-calendar-title` window event on the recorder, or from another page by
+navigating there with a one-use request the menu takes when it mounts. Solo
 events (no attendees, no meeting link) never name a recording automatically.
 
 **The link.** The live title (`lib/live-session.ts`, sessionStorage) carries
@@ -62,20 +65,23 @@ it explicitly, and library sync carries it as a meeting-scoped table.
 **Attendees.** `macos.m` returns `{name, email, organizer}` for each attendee plus
 the organizer, leaving out the user, rooms/resources/groups and people who
 declined (≤100). `calendar/attendees.rs` normalizes them on every read: emails
-from `mailto:`, lowercased; a missing or email-shaped name comes from the email
+from `mailto:`, percent-decoded and lowercased; a missing or email-shaped name comes from the email
 (`jane.doe+x@a.com` → "Jane Doe"); duplicates merge by email, else name.
 
 **Speaker picker.** `useInviteAttendees` loads the link
-(`get_meeting_calendar_event`, refreshed by `af-meeting-calendar-link`) or reads
-the live title. `inviteSuggestions` (`lib/calendar-attendees.ts`) matches each
-attendee to a contact by email, then name, and puts attendees already used for a
+(`get_meeting_calendar_event`, refreshed by `af-meeting-calendar-link`, which
+`SyncNotifier` also fires for meetings that sync imports) or reads the live
+title. `inviteSuggestions` (`lib/calendar-attendees.ts`) matches each attendee
+to a contact by email, then by name unless both have different emails, and
+puts attendees already used for a
 speaker last. `SpeakerIdentityDialog` shows them under "In this meeting's invite"
 above Contacts (matched contacts are not repeated), followed by "Wrong meeting?
 Stop suggesting this invite", which unlinks the event (`unlink_meeting_calendar_event`,
 or clears the live title's event). Picking an attendee goes through the ordinary
 rename, which creates the contact. When an event is linked, `fill_attendee_emails`
 gives every tagged contact without an email the invite's address when exactly one
-attendee has that name and no other contact uses it; after a rename
+attendee has that name (compared with spacing collapsed) and no other contact
+uses it; after a rename
 (`link::after_rename`) only the contacts just named are considered, so an email a
 user cleared is not refilled by an unrelated rename.
 
