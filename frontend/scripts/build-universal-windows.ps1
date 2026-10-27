@@ -165,6 +165,9 @@ $cudaTarget = Join-Path $repo "target\variants\cuda"
 $universalMarker = Join-Path $variants "universal.marker"
 try {
 [System.IO.File]::WriteAllText($universalMarker, "universal`r`n")
+# Compiled into every variant so the app offers the CUDA setup download only in
+# universal installs (see universal_setup_download_url in whisper_engine).
+$env:MEETILY_UNIVERSAL_INSTALLER = "1"
 
 if (-not $VulkanSdk) { $VulkanSdk = $env:VULKAN_SDK }
 if (-not $VulkanSdk -or -not (Test-Path (Join-Path $VulkanSdk "Bin\glslc.exe"))) {
@@ -266,6 +269,7 @@ try {
 }
 } finally {
   Remove-Item $universalMarker -Force -ErrorAction SilentlyContinue
+  Remove-Item Env:MEETILY_UNIVERSAL_INSTALLER -ErrorAction SilentlyContinue
 }
 
 $installer = Join-Path $cpuTarget "release\bundle\nsis\Meetily - Actually Free_${appVersion}_x64-setup.exe"

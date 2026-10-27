@@ -29,7 +29,22 @@ jobs:
       RELEASE_TAG: ${{ github.event.release.tag_name || inputs['release-tag'] }}
 
     steps:
+      # VirusTotal submission is optional: without the secret the job succeeds
+      # and records that nothing was submitted.
+      - name: Check VirusTotal configuration
+        id: config
+        shell: bash
+        run: |
+          if [[ -z "$VIRUSTOTAL_API_KEY" ]]; then
+            echo "::notice::VIRUSTOTAL_API_KEY is not set; skipping VirusTotal submission for $RELEASE_TAG."
+            echo "Skipped: \`VIRUSTOTAL_API_KEY\` is not configured." >> "$GITHUB_STEP_SUMMARY"
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Validate release and download executables
+        if: steps.config.outputs.enabled == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -41,20 +56,27 @@ jobs:
           RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG")
           test "$(jq -r .draft <<< "$RELEASE_JSON")" = "false"
           test "$(jq -r .prerelease <<< "$RELEASE_JSON")" = "false"
-          test "$(jq -r .immutable <<< "$RELEASE_JSON")" = "true"
+          if [[ "$(jq -r .immutable <<< "$RELEASE_JSON")" != "true" ]]; then
+            echo "::warning::$RELEASE_TAG is not an immutable release; its assets can still change after submission."
+          fi
 
-          VERSION=${RELEASE_TAG#v}
-          SETUP="Meetily-ActuallyFree-${VERSION}-x64-universal-setup.exe"
-          UPDATER="Meetily-ActuallyFree-${VERSION}-x64-universal-updater.exe"
           mkdir -p release
           gh release download "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
-            --pattern "$SETUP" \
-            --pattern "$UPDATER" \
             --pattern "SHA256SUMS.txt" \
             --dir release
+          # Submit every executable the manifest lists: universal setup/updater
+          # pairs and single-installer builds (for example the Vulkan CI setup).
+          mapfile -t EXECUTABLES < <(tr -d '\r' < release/SHA256SUMS.txt | awk '$2 ~ /\.exe$/ { print $2 }')
+          if (( ${#EXECUTABLES[@]} == 0 )); then
+            echo "SHA256SUMS.txt lists no .exe assets for $RELEASE_TAG."
+            exit 1
+          fi
+          for file in "${EXECUTABLES[@]}"; do
+            gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern "$file" --dir release
+          done
 
-          for file in "$SETUP" "$UPDATER"; do
+          for file in "${EXECUTABLES[@]}"; do
             test -f "release/$file"
             (
               cd release
@@ -64,16 +86,13 @@ jobs:
               printf '%s\n' "$checksum" | sha256sum --check --strict
             )
           done
-          printf 'SETUP=%s\nUPDATER=%s\n' "$SETUP" "$UPDATER" >> "$GITHUB_ENV"
+          printf 'EXECUTABLES=%s\n' "${EXECUTABLES[*]}" >> "$GITHUB_ENV"
 
       - name: Submit public executables
+        if: steps.config.outputs.enabled == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -z "$VIRUSTOTAL_API_KEY" ]]; then
-            echo "The VIRUSTOTAL_API_KEY Actions secret is required."
-            exit 1
-          fi
 
           # VirusTotal's large-file endpoint accepts at most 650 MiB.
           MAX_BYTES=$((650 * 1024 * 1024))
@@ -149,6 +168,8 @@ jobs:
             echo "| --- | --- | --- |"
           } > "$RUNNER_TEMP/vt-results.md"
 
-          submit_file "$SETUP"
-          submit_file "$UPDATER"
+          read -r -a FILES <<< "$EXECUTABLES"
+          for file in "${FILES[@]}"; do
+            submit_file "$file"
+          done
           cat "$RUNNER_TEMP/vt-results.md" >> "$GITHUB_STEP_SUMMARY"

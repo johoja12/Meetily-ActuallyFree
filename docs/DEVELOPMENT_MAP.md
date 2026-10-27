@@ -307,6 +307,17 @@ key change still poll upstream's `latest.json` with upstream's key, so they
 cannot move to fork releases through the updater; reinstall from a fork
 installer. macOS has no updater manifest.
 
+The CUDA setup download is optional. `build-universal-windows.ps1` sets
+`MEETILY_UNIVERSAL_INSTALLER` for its variant builds; only binaries compiled with it
+return a `setup_download_url` and report `reconfigurationRequired`. Other builds,
+such as the Vulkan-only `build-windows.yml` installer, publish no
+`-universal-setup.exe`, so they keep driver-update prompts but never offer a CUDA
+setup download. `build-windows.yml` builds `frontend/out` before any cargo step and
+uses `tauri.updater.conf.json` so CI emits the updater `.sig`; its NSIS toolset is
+provisioned by `build-nsis-progress-plugin.ps1` with tauri-bundler's pinned URLs
+and SHA-1s, because the bundler recreates an incomplete toolset and would drop the
+progress plugin.
+
 ## 6. Tests, qualification, and historical notes
 
 macOS publication supports an explicitly labeled CI-qualified preview via
@@ -328,7 +339,11 @@ and pipeline regressions plus bundle/launch checks; public smoke test
 `36878960910` passed. See [RELEASE_V0220_MACOS.md](RELEASE_V0220_MACOS.md) for
 provenance. Physical recording and live-transcription confirmation remain open.
 The Windows VirusTotal submission normalizes CRLF checksum manifests before
-filename matching and Linux checksum verification.
+filename matching and Linux checksum verification. It is optional: without the
+`VIRUSTOTAL_API_KEY` secret the job succeeds with a notice and submits nothing. It
+submits every `.exe` that `SHA256SUMS.txt` lists (universal setup/updater or a
+single CI installer; names must not contain spaces) and warns instead of failing
+when the release is not immutable.
 
 Live system-meter warnings are documented in
 [SYSTEM_AUDIO_LEVEL_ADVICE.md](SYSTEM_AUDIO_LEVEL_ADVICE.md).

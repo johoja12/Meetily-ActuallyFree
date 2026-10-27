@@ -182,6 +182,11 @@ fn windows_cuda_reconfiguration_status() -> CudaReconfigurationStatus {
         compute_capability.as_deref(),
     );
     let cuda_compiled = compiled_backend.eq_ignore_ascii_case("cuda");
+    // Set by build-universal-windows.ps1 for every universal variant build.
+    let setup_download_url = universal_setup_download_url(
+        option_env!("MEETILY_UNIVERSAL_INSTALLER").is_some(),
+        env!("CARGO_PKG_VERSION"),
+    );
 
     CudaReconfigurationStatus {
         compiled_backend,
@@ -193,12 +198,23 @@ fn windows_cuda_reconfiguration_status() -> CudaReconfigurationStatus {
                 | CudaDriverState::OutdatedDriver
                 | CudaDriverState::QueryFailed
         ),
-        reconfiguration_required: driver_state == CudaDriverState::Ready && !cuda_compiled,
-        setup_download_url: Some(format!(
-            "https://github.com/johoja12/Meetily-ActuallyFree/releases/download/v{version}/Meetily-ActuallyFree-{version}-x64-universal-setup.exe",
-            version = env!("CARGO_PKG_VERSION"),
-        )),
+        reconfiguration_required: driver_state == CudaDriverState::Ready
+            && !cuda_compiled
+            && setup_download_url.is_some(),
+        setup_download_url,
     }
+}
+
+/// Only the universal packager produces an installer that can switch to CUDA.
+/// Other builds (for example the Vulkan-only CI installer) publish no
+/// `-universal-setup.exe`, so they must not offer a download that 404s.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn universal_setup_download_url(universal_installer: bool, version: &str) -> Option<String> {
+    universal_installer.then(|| {
+        format!(
+            "https://github.com/johoja12/Meetily-ActuallyFree/releases/download/v{version}/Meetily-ActuallyFree-{version}-x64-universal-setup.exe"
+        )
+    })
 }
 
 // Global whisper engine
@@ -942,6 +958,15 @@ pub async fn open_models_folder() -> Result<(), String> {
 #[cfg(test)]
 mod cuda_reconfiguration_tests {
     use super::*;
+
+    #[test]
+    fn setup_download_url_is_only_offered_by_universal_builds() {
+        assert_eq!(universal_setup_download_url(false, "0.2.22"), None);
+        assert_eq!(
+            universal_setup_download_url(true, "0.2.22").as_deref(),
+            Some("https://github.com/johoja12/Meetily-ActuallyFree/releases/download/v0.2.22/Meetily-ActuallyFree-0.2.22-x64-universal-setup.exe")
+        );
+    }
 
     #[test]
     fn version_parser_handles_driver_and_compute_values() {
