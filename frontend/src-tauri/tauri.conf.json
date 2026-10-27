@@ -143,7 +143,7 @@
     },
     "plugins": {
         "updater": {
-            "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc1MjA0M0FCMkRCNzM2QUIKUldTck5yY3RxME1nZFZmNTlaSFpLYVYxelh1RFp6cE9lOFZ2VkE0VlFXdThWUzRUK091c2ZQQ3AK",
+            "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY1RTdCQTYxQkVDNjk0MUYKUldRZmxNYStZYnJuOVFwK0tPeGJ0WGVFYjNjeFhYeG1SNUtBRVp3SUo0aTYrUE9UWEkvRmlMQlkK",
             "endpoints": [
                 "https://github.com/johoja12/Meetily-ActuallyFree/releases/latest/download/latest.json"
             ]

@@ -296,10 +296,12 @@ updater endpoint in `tauri.conf.json`, the `latest.json` installer URL written b
 the packager and asserted by the verifier, and the CUDA reconfiguration
 `setup_download_url` in `whisper_engine/commands.rs`. Model assets (Parakeet,
 diarization) still download from upstream release tags, which the fork does not
-mirror. The `updater.pubkey` is still upstream's, so a fork `latest.json` will
-fail signature verification until the pubkey is replaced with one whose private
-key signs fork releases (`TAURI_SIGNING_PRIVATE_KEY`). Builds before this change
-still poll upstream's `latest.json`. macOS has no updater manifest.
+mirror. `updater.pubkey` is the fork's minisign key `F5E7BA61BEC6941F`; its
+private key is held by the fork maintainer outside the repository and must be
+supplied as `TAURI_SIGNING_PRIVATE_KEY` when packaging. Installs built before the
+key change still poll upstream's `latest.json` with upstream's key, so they
+cannot move to fork releases through the updater; reinstall from a fork
+installer. macOS has no updater manifest.
 
 ## 6. Tests, qualification, and historical notes
 
