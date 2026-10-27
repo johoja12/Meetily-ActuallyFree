@@ -675,6 +675,54 @@ pub async fn enroll_person_voice(
     Ok(info)
 }
 
+/// What a contact's voice could be learned from: meetings where they are
+/// named by the user (not by a voice match) and, of those, how many still have
+/// the call audio a voice is learned from.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct VoiceCandidates {
+    pub named: u32,
+    pub with_audio: u32,
+    pub automatic: u32,
+    pub models_ready: bool,
+}
+
+pub(crate) async fn voice_candidates(pool: &SqlitePool, person_id: &str) -> Result<VoiceCandidates, sqlx::Error> {
+    let rows: Vec<(String, Option<String>, bool)> = sqlx::query_as(
+        "SELECT ps.speaker_label, m.folder_path, EXISTS (SELECT 1 FROM voice_speaker_matches v \
+             WHERE v.meeting_id = ps.meeting_id AND v.person_id = ps.person_id AND v.status = 'applied') \
+         FROM person_speakers ps JOIN meetings m ON m.id = ps.meeting_id WHERE ps.person_id = ?",
+    )
+    .bind(person_id)
+    .fetch_all(pool)
+    .await?;
+    let paths: Vec<(bool, Option<String>)> = rows
+        .into_iter()
+        .filter(|(label, _, _)| crate::database::repositories::person::is_person_name(label))
+        .map(|(_, folder, automatic)| (automatic, folder))
+        .collect();
+    // File checks can hit a cloud-synced folder; keep them off the async runtime.
+    let with_audio = tokio::task::spawn_blocking({
+        let manual: Vec<String> = paths.iter().filter(|(automatic, _)| !automatic).filter_map(|(_, folder)| folder.clone()).collect();
+        move || manual.iter().filter(|folder| call_track(Path::new(folder)).is_file()).count() as u32
+    })
+    .await
+    .unwrap_or(0);
+    Ok(VoiceCandidates {
+        named: paths.iter().filter(|(automatic, _)| !automatic).count() as u32,
+        with_audio,
+        automatic: paths.iter().filter(|(automatic, _)| *automatic).count() as u32,
+        models_ready: super::pyannote_models_available(),
+    })
+}
+
+#[tauri::command]
+pub async fn voice_learning_candidates(
+    state: tauri::State<'_, crate::state::AppState>,
+    person_id: String,
+) -> Result<VoiceCandidates, String> {
+    voice_candidates(state.db_manager.pool(), &person_id).await.map_err(|error| error.to_string())
+}
+
 /// Voices Meetily knows, each under its contact's current name. A voice whose
 /// contact no longer exists is forgotten here.
 #[tauri::command]
@@ -907,6 +955,38 @@ pub fn contact_deleted(person_id: &str) {
         log::warn!("Could not forget a deleted contact's voice: {error}");
     }
     record_forgotten(person_id);
+}
+
+#[cfg(test)]
+mod candidate_tests {
+    use super::*;
+    use crate::sync::test_support::migrated_pool;
+
+    #[tokio::test]
+    async fn candidates_count_manual_names_with_call_audio() {
+        let root = std::env::temp_dir().join(format!("meetily-voice-candidates-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (folder, audio) in [("with", true), ("without", false), ("auto", true)] {
+            std::fs::create_dir_all(root.join(folder)).unwrap();
+            if audio { std::fs::write(root.join(folder).join("system.mp4"), b"audio").unwrap(); }
+        }
+        let pool = migrated_pool().await;
+        let folder = |name: &str| root.join(name).to_string_lossy().to_string();
+        for (id, path) in [("m1", Some(folder("with"))), ("m2", Some(folder("without"))), ("m3", Some(folder("auto"))), ("m4", None)] {
+            sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at, folder_path) VALUES (?, 'T', 'c', 'u', ?)")
+                .bind(id).bind(path).execute(&pool).await.unwrap();
+        }
+        sqlx::raw_sql(
+            "INSERT INTO people (id, display_name, normalized_name, created_at, updated_at) VALUES ('p1', 'Jane', 'jane', 'c', 'u'); \
+             INSERT INTO person_speakers (person_id, meeting_id, speaker_label) VALUES \
+                ('p1', 'm1', 'Jane'), ('p1', 'm2', 'Jane'), ('p1', 'm3', 'Jane'), ('p1', 'm4', 'Jane'); \
+             INSERT INTO voice_speaker_matches (meeting_id, original_label, person_id, status, created_at) VALUES ('m3', 'Speaker 1', 'p1', 'applied', 'c');",
+        ).execute(&pool).await.unwrap();
+        let found = voice_candidates(&pool, "p1").await.unwrap();
+        assert_eq!((found.named, found.with_audio, found.automatic), (3, 1, 1));
+        assert_eq!(voice_candidates(&pool, "nobody").await.unwrap(), VoiceCandidates { models_ready: found.models_ready, ..Default::default() });
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
 
 #[cfg(test)]

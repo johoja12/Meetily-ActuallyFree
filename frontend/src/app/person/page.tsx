@@ -15,7 +15,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import {
   ArrowLeft,
-  Fingerprint,
   GitMerge,
   Mail,
   MoreHorizontal,
@@ -27,10 +26,7 @@ import {
 import { cn } from '@/lib/utils';
 import { useWorkspace } from '@/contexts/WorkspaceContext';
 import { useAutosave, saveStateLabel } from '@/hooks/useAutosave';
-import { useLabs } from '@/hooks/useLabs';
-import { useVoiceProfiles } from '@/hooks/useVoiceProfiles';
-import { Badge } from '@/components/ui/badge';
-import { describeVoiceError, describeVoiceSource, forgetVoice, learnContactVoice } from '@/lib/voice-profiles';
+import { ContactVoicePanel } from '@/components/people/ContactVoicePanel';
 import { Avatar } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
@@ -93,92 +89,6 @@ function PrivateNotes({ personId, initial }: { personId: string; initial: string
         className="resize-y text-[13px] leading-relaxed"
       />
       <p className="mt-2 text-[11px] leading-relaxed text-af-text-4">Only for you. Saved as you type, and never sent to AI.</p>
-    </Panel>
-  );
-}
-
-/**
- * Labs voice profiles: learn this contact's voice from their meetings, so
- * later meetings name a matching speaker after them. Shown while the Labs
- * switch is on, or when a voice was learned before it was turned off.
- */
-function VoicePanel({ personId, first, meetingCount }: { personId: string; first: string; meetingCount: number }) {
-  const { labs } = useLabs();
-  const voices = useVoiceProfiles();
-  const voice = voices?.find((profile) => profile.person_id === personId);
-  const [busy, setBusy] = useState<'learn' | 'forget' | null>(null);
-  const who = first || 'them';
-
-  if (!labs.voiceProfiles && !voice) return null;
-
-  // Reads all their recent meetings, so an update picks up new ones.
-  const learn = async () => {
-    const updating = !!voice;
-    setBusy('learn');
-    try {
-      const learned = await learnContactVoice(personId);
-      toast.success(`${updating ? 'Updated' : 'Learned'} ${first || learned.name}'s voice`, {
-        description: `From ${describeVoiceSource(learned)}.`,
-      });
-    } catch (error) {
-      toast.error(`Could not ${updating ? 'update' : 'learn'} ${who}'s voice`, { description: describeVoiceError(error) });
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const forget = async () => {
-    setBusy('forget');
-    try {
-      await forgetVoice(personId);
-      toast.success(`Forgot ${who}'s voice`);
-    } catch (error) {
-      toast.error('Could not forget the voice', { description: describeVoiceError(error) });
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  return (
-    <Panel title="Voice" action={<Badge variant="accent" size="xs">Labs</Badge>}>
-      {voices === null ? (
-        <Skeleton className="h-16" />
-      ) : voice ? (
-        <>
-          <p className="flex items-center gap-2 text-[13px] font-medium text-af-text">
-            <Fingerprint className="h-4 w-4 shrink-0 text-af-accent" />
-            Meetily knows {who === 'them' ? 'their' : `${who}'s`} voice
-          </p>
-          <p className="mt-1 text-xs leading-relaxed text-af-text-3">
-            {labs.voiceProfiles
-              ? `Learned from ${describeVoiceSource(voice)}. When speakers are identified in a new meeting, a matching voice is named ${first || voice.name}. Update relearns it from all their recent meetings.`
-              : 'Voice profiles are off in Settings > Labs, so this voice is not used right now.'}
-          </p>
-          <div className="mt-3 flex flex-wrap gap-2">
-            {labs.voiceProfiles && (
-              <Button size="sm" variant="secondary" onClick={() => void learn()} loading={busy === 'learn'} disabled={busy !== null}>
-                <Fingerprint />
-                Update voice
-              </Button>
-            )}
-            <Button size="sm" variant="danger-ghost" onClick={() => void forget()} loading={busy === 'forget'} disabled={busy !== null}>
-              Forget voice
-            </Button>
-          </div>
-        </>
-      ) : (
-        <>
-          <p className="text-[13px] leading-relaxed text-af-text-3">
-            {meetingCount > 0
-              ? `Learn ${who === 'them' ? 'their' : `${who}'s`} voice from their recent meetings where they spoke on the call. Later meetings then name a matching voice for you.`
-              : `Once ${who} is named in a recorded meeting, Meetily can learn their voice from it.`}
-          </p>
-          <Button className="mt-3" size="sm" onClick={() => void learn()} loading={busy === 'learn'} disabled={meetingCount === 0 || busy !== null}>
-            <Fingerprint />
-            Learn voice
-          </Button>
-        </>
-      )}
     </Panel>
   );
 }
@@ -446,7 +356,7 @@ function PersonPageInner() {
 
           <div className="flex min-w-0 flex-col gap-4">
             {profile && <PrivateNotes personId={profile.id} initial={profile.notes ?? ''} />}
-            {profile && <VoicePanel personId={profile.id} first={first} meetingCount={profile.meetingCount} />}
+            {profile && <ContactVoicePanel personId={profile.id} first={first} />}
             <Panel title={`Ask about ${first || 'them'}`} className="flex h-[28rem] flex-col p-0 pt-4 [&>header]:px-4">
               <ChatThread
                 historyKey={`person:${personId}`}
