@@ -47,7 +47,7 @@ pub struct CalendarMeeting {
     pub end_ms: i64,
     pub is_meeting: bool,
     /// Everyone invited except the user, rooms and people who declined.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "attendees::lenient")]
     pub attendees: Vec<attendees::CalendarAttendee>,
 }
 impl CalendarMeeting {
@@ -481,6 +481,21 @@ mod tests {
         )
         .unwrap();
         assert!(read.events[0].attendees.is_empty());
+    }
+    #[test]
+    fn numeric_flags_or_a_malformed_attendee_list_never_fail_the_read() {
+        // Objective-C boxes a C boolean expression as a number (1/0).
+        let read: ReadResult = serde_json::from_str(
+            r#"{"authorization":"authorized","events":[
+                {"id":"e","title":"T","calendar_id":"c","calendar_name":"C","start_ms":1,"end_ms":2,"is_meeting":true,
+                 "attendees":[{"name":"Jane","email":null,"organizer":1},{"name":"Bob","email":"b@a.com","organizer":0}]},
+                {"id":"f","title":"U","calendar_id":"c","calendar_name":"C","start_ms":1,"end_ms":2,"is_meeting":true,
+                 "attendees":"not a list"}]}"#,
+        )
+        .unwrap();
+        assert!(read.events[0].attendees[0].organizer);
+        assert!(!read.events[0].attendees[1].organizer);
+        assert!(read.events[1].attendees.is_empty());
     }
     #[test]
     fn calendar_prompts_are_bounded_and_require_a_meeting() {

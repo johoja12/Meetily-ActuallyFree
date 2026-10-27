@@ -11,7 +11,27 @@ const MAX_FIELD: usize = 200;
 pub struct CalendarAttendee {
     pub name: String,
     pub email: Option<String>,
+    #[serde(deserialize_with = "flag")]
     pub organizer: bool,
+}
+
+/// true/false, or 1/0 as Objective-C boxes a C boolean expression.
+fn flag<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    Ok(match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Bool(value) => value,
+        serde_json::Value::Number(number) => number.as_f64().is_some_and(|value| value != 0.0),
+        _ => false,
+    })
+}
+
+/// An attendee list that does not parse is dropped, never the whole read:
+/// attendees are optional to every calendar feature.
+pub fn lenient<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<CalendarAttendee>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(match value {
+        serde_json::Value::Array(items) => items.into_iter().filter_map(|item| serde_json::from_value(item).ok()).collect(),
+        _ => Vec::new(),
+    })
 }
 
 /// `mailto:` URLs escape characters such as "+" (`%2B`). Invalid escapes stay.
