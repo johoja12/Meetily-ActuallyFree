@@ -87,7 +87,8 @@ char *meetily_calendar_read(bool requestAccess, const char *selectedJSON, double
                         [people addObject:@{
                             @"name": person.name ?: @"",
                             @"email": address ?: [NSNull null],
-                            @"organizer": @([person isEqual:organizer] || person.participantRole == EKParticipantRoleChair)
+                            // (BOOL): boxing a C `||` makes an int, which JSON writes as 1/0.
+                            @"organizer": @((BOOL)([person isEqual:organizer] || person.participantRole == EKParticipantRoleChair))
                         }];
                     }
                     [meetings addObject:@{
