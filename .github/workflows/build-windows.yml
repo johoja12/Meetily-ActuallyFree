@@ -476,13 +476,13 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 8
+          version: 11.9.0
           run_install: false
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
 
       - name: Get pnpm store directory
         shell: bash
@@ -637,7 +637,17 @@ jobs:
       - name: Install frontend dependencies
         run: |
           cd frontend
-          pnpm install
+          pnpm install --frozen-lockfile
+
+      # The NSIS-plugin step compiles the app crate, whose generate_context!
+      # embeds frontend/out, so the static export must exist before any cargo
+      # build. tauri.updater.conf.json then skips the duplicate beforeBuildCommand.
+      - name: Build frontend
+        env:
+          NEXT_TELEMETRY_DISABLED: '1'
+        run: |
+          cd frontend
+          pnpm run build
 
       - name: Build llama-helper sidecar
         shell: pwsh
@@ -691,7 +701,7 @@ jobs:
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
         with:
           projectPath: frontend
-          args: --target x86_64-pc-windows-msvc --features vulkan ${{ steps.build-profile.outputs.args }}
+          args: --config src-tauri/tauri.updater.conf.json --target x86_64-pc-windows-msvc --features vulkan ${{ steps.build-profile.outputs.args }}
 
       - name: Verify build artifacts
         shell: bash
