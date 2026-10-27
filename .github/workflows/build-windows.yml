@@ -1,3 +1,5 @@
+# Updater artifacts are signed with TAURI_SIGNING_PRIVATE_KEY. sign-build adds
+# DigiCert code signing and needs the SM_* secrets, which the fork does not have.
 name: "Build and Test - Windows"
 
 on:
