@@ -168,6 +168,43 @@ learned from room-microphone audio may score lower against call audio (and the
 reverse); a wrong match at the existing threshold is possible, and Undo is the
 remedy.
 
+### Your own voice
+
+You have no contact row, so your voice profile is kept in `voice_profiles.json`
+under the reserved id `voice_profiles::SELF_ID` (`"self"`, shown as `You`;
+`SELF_VOICE_ID` in `lib/voice-profiles.ts`). It is built like a contact's
+voice, but from your `You` lines on `mic.mp4`, in every recording mode.
+
+- Learn: Learn voice in the "Your voice" panel (Settings > Labs > Voice
+  profiles) rebuilds it from up to twelve recent meetings with `You` lines
+  (`enroll_person_voice` with `personId: "self"`); Remember voice on your own
+  speaker card adds one meeting (`enroll_voice_profile` with speaker `You`).
+  "This is me" (a rename to `You`) enqueues learning like naming a contact.
+  Saving a meeting does not learn your voice by itself, because the mic label is
+  assigned by audio source, not by you.
+- Match: only the background worker uses it, and only in room-microphone
+  meetings, where you are on the matched track. There it can rename one
+  `Speaker N` to `You`. `load_for_matching` leaves your voice out, so live
+  matching, post-call diarization matching, and call-track meetings never name
+  a call speaker `You`; `load_all_for_matching` includes it for the worker.
+- `self_voice_matches` (migration `20261028000000`, synced, removed with its
+  meeting) is the counterpart of `voice_speaker_matches` for you, since that
+  table's `person_id` must reference `people`. Undo, rejection on renaming
+  `You` away, and "a matched meeting never trains the voice" work the same way.
+- Contact reconciliation and sync's hold-back of voices whose contact has not
+  arrived both keep `self`.
+
+Separate from this, `voiceprint.rs` still keeps an automatic, hidden user
+voiceprint, updated from the mic track after two-track diarization and used to
+pick the `You` cluster when only one file is diarized. The two are not merged.
+
+Tests: `voice_learning::tests::your_voice_*` and `renaming_you_away_*`
+(in-memory apply, undo, rejection, "This is me" learning),
+`voice_profiles::candidate_tests::your_candidates_*` (mic audio counts, call
+audio does not), reconcile and sync hold-back cases, and the frontend
+`contact-voices` and `contact-voice-panel` tests. No real-audio test covers
+learning or matching your voice.
+
 Live manual names now create person links when the meeting is saved. For older
 meetings whose transcript has a name but lacks that link, enrollment repairs the
 link using the saved label. Only generic labels prompt the user to name the

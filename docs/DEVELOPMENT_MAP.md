@@ -443,7 +443,9 @@ WeSpeaker embeddings in Pyannote live sessions and as a separate identity
 matcher for Nemotron live and both post-call paths. Naming a speaker also learns their
 voice, and a native worker (`diarization/voice_learning.rs`) names matching
 unnamed speakers in past and new meetings from transcript spans, room-microphone
-meetings included, with Undo. Nemotron remains the selected
+meetings included, with Undo. Your own voice can be learned too (from your `You`
+lines on the mic track, under the reserved id `self`), and names you `You` in
+room-microphone meetings only. Nemotron remains the selected
 diarizer; its channel numbers never establish persistent identity.
 
 From `frontend/`, run all frontend test files in separate Bun processes. The

@@ -18,7 +18,7 @@ import { useWorkspace } from '@/contexts/WorkspaceContext';
 import { useUserName } from '@/hooks/useUserName';
 import { useLabs } from '@/hooks/useLabs';
 import { useVoiceProfiles } from '@/hooks/useVoiceProfiles';
-import { describeVoiceError, describeVoiceSource, learnSpeakerVoice } from '@/lib/voice-profiles';
+import { describeVoiceError, describeVoiceSource, learnSpeakerVoice, SELF_VOICE_ID } from '@/lib/voice-profiles';
 import { listActionItems, type ActionItem } from '@/lib/workspace-api';
 import { formatRelativePast, parseDate } from '@/lib/dates';
 import { displaySpeaker, isUserSpeaker, speakerDot, splitSpeakerLabel } from '@/utils/speakerUtils';
@@ -80,23 +80,28 @@ export function PersonCard({
 
   const lastSeen = parseDate(contact?.lastSeenAt);
   const label = displaySpeaker(speaker, userName);
-  const voice = contact ? voices?.find((profile) => profile.person_id === contact.id) : undefined;
-  const canLearnVoice = !!contact && !!meetingId && labs.voiceProfiles && voices !== null;
+  // You have a voice too, kept under SELF_VOICE_ID and learned from your mic.
+  const voiceId = isYou ? SELF_VOICE_ID : contact?.id;
+  const voice = voiceId ? voices?.find((profile) => profile.person_id === voiceId) : undefined;
+  const canLearnVoice = !!voiceId && !!meetingId && labs.voiceProfiles && voices !== null;
+  const whose = isYou ? 'your' : `${contact?.displayName}'s`;
 
   // Adds this meeting's audio to the voice (or starts it).
   const learnVoice = async () => {
-    if (!contact || !meetingId || learning) return;
+    if (!voiceId || !meetingId || learning) return;
     const updating = !!voice;
     setLearning(true);
     try {
       const profile = await learnSpeakerVoice(meetingId, speaker);
-      toast.success(`${updating ? 'Updated' : 'Learned'} ${profile.name}'s voice`, {
+      toast.success(`${updating ? 'Updated' : 'Learned'} ${isYou ? 'your' : `${profile.name}'s`} voice`, {
         description: updating
           ? `Now from ${describeVoiceSource(profile)}, including this one.`
-          : `From ${describeVoiceSource(profile)}. Later meetings name a matching voice after them.`,
+          : isYou
+            ? `From ${describeVoiceSource(profile)}. Room-microphone meetings name a speaker with your voice You.`
+            : `From ${describeVoiceSource(profile)}. Later meetings name a matching voice after them.`,
       });
     } catch (error) {
-      toast.error(`Could not ${updating ? 'update' : 'learn'} ${contact.displayName}'s voice`, { description: describeVoiceError(error) });
+      toast.error(`Could not ${updating ? 'update' : 'learn'} ${whose} voice`, { description: describeVoiceError(error) });
     } finally {
       setLearning(false);
     }
