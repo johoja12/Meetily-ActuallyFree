@@ -1496,7 +1496,7 @@ pub async fn diarize_meeting(
         }
     }
 
-    persist_speaker_labels(pool, &meeting_id, updates).await.map_err(|e| format!("Failed to save speaker labels: {e}"))?;
+    persist_speaker_labels(pool, &meeting_id, &selected_engine, updates).await.map_err(|e| format!("Failed to save speaker labels: {e}"))?;
 
     // Link contacts whose saved voice profile named a cluster in this meeting.
     // The labels are already saved, so a voice whose contact is gone is
@@ -1595,6 +1595,7 @@ pub async fn diarize_meeting(
 async fn persist_speaker_labels(
     pool: &sqlx::SqlitePool,
     meeting_id: &str,
+    engine: &str,
     updates: Vec<(String, Option<String>)>,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
@@ -1602,6 +1603,10 @@ async fn persist_speaker_labels(
         sqlx::query("UPDATE transcripts SET speaker = ? WHERE id = ? AND meeting_id = ?")
             .bind(label).bind(id).bind(meeting_id).execute(&mut *tx).await?;
     }
+    // Committed with the labels, so the header never claims speakers were
+    // identified when the labels rolled back.
+    sqlx::query("UPDATE meetings SET speakers_identified_by = ? WHERE id = ?")
+        .bind(engine).bind(meeting_id).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -1747,19 +1752,23 @@ mod tests {
     #[tokio::test]
     async fn label_reruns_preserve_text_timing_and_rollback_as_a_unit() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+        sqlx::query("CREATE TABLE meetings(id TEXT PRIMARY KEY, speakers_identified_by TEXT)").execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO meetings VALUES ('m', NULL)").execute(&pool).await.unwrap();
         sqlx::query("CREATE TABLE transcripts(id TEXT PRIMARY KEY, meeting_id TEXT, transcript TEXT, audio_start_time REAL, audio_end_time REAL, speaker TEXT CHECK(speaker != 'invalid'))").execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO transcripts VALUES ('a','m','Hello. 世界! Second turn.',1.25,9.5,'Guest'),('a-split-1','m','Retain this old row too.',9.5,12.0,'Guest'),('other','other','Private other meeting',0,1,'Named')").execute(&pool).await.unwrap();
         for label in ["Speaker 1", "You + Speaker 2"] {
-            persist_speaker_labels(&pool,"m",vec![("a".into(),Some(label.into())),("other".into(),Some(label.into()))]).await.unwrap();
+            persist_speaker_labels(&pool,"m","nemotron",vec![("a".into(),Some(label.into())),("other".into(),Some(label.into()))]).await.unwrap();
         }
         let rows: Vec<(String,String,f64,f64)> = sqlx::query_as("SELECT id,transcript,audio_start_time,audio_end_time FROM transcripts ORDER BY id").fetch_all(&pool).await.unwrap();
         assert_eq!(rows.len(),3);
         assert_eq!(rows[0],("a".into(),"Hello. 世界! Second turn.".into(),1.25,9.5));
         assert_eq!(rows[1].1,"Retain this old row too.");
-        let failed = persist_speaker_labels(&pool,"m",vec![("a".into(),Some("Speaker 3".into())),("a-split-1".into(),Some("invalid".into()))]).await;
+        let failed = persist_speaker_labels(&pool,"m","pyannote",vec![("a".into(),Some("Speaker 3".into())),("a-split-1".into(),Some("invalid".into()))]).await;
         assert!(failed.is_err());
         let labels: Vec<String> = sqlx::query_scalar("SELECT speaker FROM transcripts ORDER BY id").fetch_all(&pool).await.unwrap();
         assert_eq!(labels,vec!["You + Speaker 2","Guest","Named"]);
+        let engine: Option<String> = sqlx::query_scalar("SELECT speakers_identified_by FROM meetings WHERE id = 'm'").fetch_one(&pool).await.unwrap();
+        assert_eq!(engine.as_deref(), Some("nemotron"));
     }
 
     #[test]

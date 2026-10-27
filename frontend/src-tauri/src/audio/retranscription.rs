@@ -424,6 +424,12 @@ async fn run_retranscription<R: Runtime>(
     } else {
         None
     };
+    // Recorded with the new rows below; the engines above load exactly this model.
+    let (used_provider, used_model) = if use_parakeet {
+        ("parakeet", match &model { Some(m) => m.clone(), None => get_configured_parakeet_model(&app).await? })
+    } else {
+        ("whisper", match &model { Some(m) => m.clone(), None => get_configured_whisper_model(&app).await? })
+    };
 
     // Split very long segments at silence boundaries for better transcription quality.
     // Hard cuts at arbitrary sample positions lose words at boundaries. Instead, scan
@@ -679,6 +685,18 @@ async fn run_retranscription<R: Runtime>(
         .await
         .map_err(|e| anyhow!("Failed to insert transcript: {}", e))?;
     }
+
+    // Same commit as the rows it describes. Diarization labels did not survive
+    // the replacement (only manual names are carried over), so clear them.
+    sqlx::query(
+        "UPDATE meetings SET transcript_pass = 'enhanced', transcript_provider = ?, transcript_model = ?, speakers_identified_by = NULL WHERE id = ?",
+    )
+    .bind(used_provider)
+    .bind(&used_model)
+    .bind(&meeting_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| anyhow!("Failed to record transcript model: {}", e))?;
 
     tx.commit().await
         .map_err(|e| anyhow!("Failed to commit transaction: {}", e))?;
