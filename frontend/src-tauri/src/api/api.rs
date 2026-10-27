@@ -1105,6 +1105,19 @@ pub async fn api_get_meeting_metadata<R: Runtime>(
     }
 }
 
+/// Which pass and model produced the saved transcript, and which engine
+/// labeled its speakers. `None` fields are unknown (older meetings).
+#[tauri::command]
+pub async fn api_get_transcript_provenance(
+    meeting_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<crate::database::repositories::meeting::TranscriptProvenance, String> {
+    MeetingsRepository::get_transcript_provenance(state.db_manager.pool(), &meeting_id)
+        .await
+        .map_err(|e| format!("Failed to read transcript provenance: {}", e))?
+        .ok_or_else(|| format!("Meeting not found: {}", meeting_id))
+}
+
 /// Get paginated transcripts for a meeting
 #[tauri::command]
 pub async fn api_get_meeting_transcripts<R: Runtime>(
@@ -1275,6 +1288,18 @@ pub async fn api_save_transcript<R: Runtime>(
                 "Successfully saved transcript and created meeting with id: {}",
                 meeting_id
             );
+            // The live engine is chosen from these settings at record start and
+            // cannot change while recording. A save from crash recovery runs
+            // later, so it can name a model selected after that recording.
+            match SettingsRepository::get_transcript_config(pool).await {
+                Ok(Some(config)) => {
+                    if let Err(e) = MeetingsRepository::record_live_transcript(pool, &meeting_id, &config.provider, &config.model).await {
+                        log_warn!("Failed to record live transcript model for {}: {}", meeting_id, e);
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => log_warn!("Failed to read transcript settings for {}: {}", meeting_id, e),
+            }
             crate::diarization::voice_learning::meeting_saved(pool, &meeting_id).await;
             Ok(serde_json::json!({
                 "status": "success",

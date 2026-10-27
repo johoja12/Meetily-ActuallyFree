@@ -592,6 +592,9 @@ function handle(cmd: string, args: Args): unknown {
       if (!entry) throw new Error('Meeting not found');
       return { id: entry.id, title: entry.title, created_at: entry.created_at, updated_at: entry.created_at, folder_path: entry.folder_path };
     }
+    case 'api_get_transcript_provenance':
+      // A live, not-yet-identified meeting shows every header pill.
+      return { transcript_pass: 'live', transcript_provider: 'parakeet', transcript_model: 'parakeet-tdt-0.6b-v3-int8', speakers_identified_by: null };
     case 'api_get_meeting_transcripts': {
       const rows = transcripts(args.meetingId);
       const offset = args.offset ?? 0;

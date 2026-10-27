@@ -2,8 +2,9 @@
 
 /**
  * One header for a meeting: the title (edit in place), when it happened, its
- * group, the people who spoke (click one to name or open them), Export, and a
- * ⋯ menu for everything else.
+ * group, how the transcript was made (model, enhancement, speakers), the people
+ * who spoke (click one to name or open them), Export, and a ⋯ menu for
+ * everything else.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
@@ -24,6 +25,7 @@ import {
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Avatar } from '@/components/ui/avatar';
+import { Badge, badgeVariants } from '@/components/ui/badge';
 import { Hint } from '@/components/ui/tooltip';
 import { Spinner } from '@/components/ui/spinner';
 import {
@@ -46,6 +48,14 @@ import { useUserName } from '@/hooks/useUserName';
 import { isUserSpeaker, speakerKey } from '@/utils/speakerUtils';
 import { SavedCalendarTitleSuggestions } from '@/components/calendar/SavedCalendarTitleSuggestions';
 import { useDiarizationEngine } from '@/hooks/useDiarizationEngine';
+import { onWorkspaceChange } from '@/lib/workspace-api';
+import {
+  diarizationEngineLabel,
+  isEnhancementRecommended,
+  speakersNotIdentified,
+  transcriptModelLabel,
+  type TranscriptProvenance,
+} from '@/lib/transcript-provenance';
 
 const isGenericSpeaker = (label: string) => /^speaker d+$/i.test(label.trim()) || /^guest$/i.test(label.trim());
 
@@ -111,10 +121,29 @@ export function MeetingHeader({
   const [identifying, setIdentifying] = useState(false);
   const [diarizeAvailable, setDiarizeAvailable] = useState(false);
   const [enhanceOpen, setEnhanceOpen] = useState(false);
+  const [provenance, setProvenance] = useState<TranscriptProvenance | null>(null);
+  const [provenanceVersion, setProvenanceVersion] = useState(0);
 
   useEffect(() => {
     invoke<boolean>('diarization_models_available').then(setDiarizeAvailable).catch(() => setDiarizeAvailable(false));
   }, []);
+
+  // Re-read after anything here or the background post-call worker (which
+  // announces 'people' once its rerun lands) may have replaced the rows.
+  useEffect(() => onWorkspaceChange(['people', 'meetings'], () => setProvenanceVersion((v) => v + 1)), []);
+  useEffect(() => {
+    let current = true;
+    invoke<TranscriptProvenance>('api_get_transcript_provenance', { meetingId })
+      .then((value) => { if (current) setProvenance(value); })
+      .catch(() => { if (current) setProvenance(null); });
+    return () => { current = false; };
+  }, [meetingId, provenanceVersion]);
+  const transcriptChanged = useCallback(async () => {
+    setProvenanceVersion((v) => v + 1);
+    await onTranscriptChanged();
+  }, [onTranscriptChanged]);
+  const modelLabel = provenance ? transcriptModelLabel(provenance) : null;
+  const enhanced = provenance?.transcript_pass === 'enhanced';
 
   const start = parseDate(createdAt);
   const end = start && durationSeconds ? new Date(start.getTime() + durationSeconds * 1000) : null;
@@ -136,13 +165,13 @@ export function MeetingHeader({
         id: toastId,
         description: `${result.labeled} lines labelled.`,
       });
-      await onTranscriptChanged();
+      await transcriptChanged();
     } catch (error) {
       toast.error('Speaker identification failed', { id: toastId, description: error instanceof Error ? error.message : String(error) });
     } finally {
       setIdentifying(false);
     }
-  }, [expected, isNemotron, meetingId, onTranscriptChanged]);
+  }, [expected, isNemotron, meetingId, transcriptChanged]);
 
   return (
     <header className="shrink-0 border-b border-af-border px-5 pb-3 pt-4">
@@ -154,6 +183,49 @@ export function MeetingHeader({
             {durationSeconds ? <span className="tabular-nums">{formatDuration(durationSeconds)}</span> : null}
             <SavedCalendarTitleSuggestions meetingId={meetingId} onRename={onRename} />
             <GroupPicker value={groupId} onChange={onGroupChange} placeholder="Add to group" />
+            {provenance?.transcript_pass && modelLabel && (
+              <Hint label={enhanced ? 'Retranscribed from the full recording' : 'Transcribed live while recording'}>
+                <Badge variant={enhanced ? 'accent' : 'neutral'} tabIndex={0}>
+                  {enhanced ? <Wand2 /> : <AudioLines />}
+                  {enhanced ? 'Enhanced' : 'Live'} · {modelLabel}
+                </Badge>
+              </Hint>
+            )}
+            {isEnhancementRecommended(provenance, !!folderPath) && (
+              <Hint label="The live pass hears short pieces as they arrive. Enhancing retranscribes the whole recording.">
+                <button
+                  type="button"
+                  onClick={() => setEnhanceOpen(true)}
+                  className={cn(badgeVariants({ variant: 'warning' }), 'cursor-pointer transition-opacity hover:opacity-80')}
+                >
+                  <Wand2 />
+                  Enhancing recommended
+                </button>
+              </Hint>
+            )}
+            {provenance?.speakers_identified_by ? (
+              <Badge variant="success">
+                <Users />
+                Speakers identified · {diarizationEngineLabel(provenance.speakers_identified_by)}
+              </Badge>
+            ) : speakersNotIdentified(provenance) && (
+              diarizeAvailable ? (
+                <button
+                  type="button"
+                  onClick={() => { setExpected(''); setIdentifyOpen(true); }}
+                  disabled={identifying}
+                  className={cn(badgeVariants({ variant: 'outline' }), 'cursor-pointer transition-colors hover:bg-af-hover hover:text-af-text-2 disabled:cursor-default disabled:opacity-60')}
+                >
+                  <Users />
+                  Speakers not identified
+                </button>
+              ) : (
+                <Badge variant="outline">
+                  <Users />
+                  Speakers not identified
+                </Badge>
+              )
+            )}
           </div>
           {uniquePeople.length > 0 && (
             <ul aria-label="People in this meeting" className="-ml-1 mt-2 flex flex-wrap items-center gap-0.5">
@@ -321,7 +393,7 @@ export function MeetingHeader({
           onOpenChange={setEnhanceOpen}
           meetingId={meetingId}
           meetingFolderPath={folderPath}
-          onComplete={() => void onTranscriptChanged()}
+          onComplete={() => void transcriptChanged()}
         />
       )}
     </header>

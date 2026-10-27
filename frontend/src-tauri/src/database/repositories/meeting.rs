@@ -282,6 +282,47 @@ impl MeetingsRepository {
         transaction.commit().await?;
         Ok(true)
     }
+
+    /// Records that the saved rows are the live pass. Called after the live
+    /// save commits; a failure only loses the header pill, never the meeting.
+    pub async fn record_live_transcript(
+        pool: &SqlitePool,
+        meeting_id: &str,
+        provider: &str,
+        model: &str,
+    ) -> Result<(), SqlxError> {
+        sqlx::query(
+            "UPDATE meetings SET transcript_pass = 'live', transcript_provider = ?, transcript_model = ? WHERE id = ?",
+        )
+        .bind(provider)
+        .bind(model)
+        .bind(meeting_id)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_transcript_provenance(
+        pool: &SqlitePool,
+        meeting_id: &str,
+    ) -> Result<Option<TranscriptProvenance>, SqlxError> {
+        sqlx::query_as::<_, TranscriptProvenance>(
+            "SELECT transcript_pass, transcript_provider, transcript_model, speakers_identified_by
+             FROM meetings WHERE id = ?",
+        )
+        .bind(meeting_id)
+        .fetch_optional(pool)
+        .await
+    }
+}
+
+/// See migration 20261028000000_add_transcript_provenance for the values.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, sqlx::FromRow)]
+pub struct TranscriptProvenance {
+    pub transcript_pass: Option<String>,
+    pub transcript_provider: Option<String>,
+    pub transcript_model: Option<String>,
+    pub speakers_identified_by: Option<String>,
 }
 
 #[cfg(test)]
@@ -538,6 +579,24 @@ mod tests {
                 ("typed".to_string(), "<Add Title here>".to_string()),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn live_transcript_provenance_round_trips_and_older_meetings_stay_unknown() {
+        let pool = SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at) VALUES ('old', 'T', 'c', 'u'), ('new', 'T', 'c', 'u')")
+            .execute(&pool).await.unwrap();
+
+        MeetingsRepository::record_live_transcript(&pool, "new", "parakeet", "parakeet-tdt-0.6b-v3-int8").await.unwrap();
+
+        let unknown = TranscriptProvenance { transcript_pass: None, transcript_provider: None, transcript_model: None, speakers_identified_by: None };
+        assert_eq!(MeetingsRepository::get_transcript_provenance(&pool, "old").await.unwrap(), Some(unknown));
+        let live = MeetingsRepository::get_transcript_provenance(&pool, "new").await.unwrap().unwrap();
+        assert_eq!(live.transcript_pass.as_deref(), Some("live"));
+        assert_eq!(live.transcript_model.as_deref(), Some("parakeet-tdt-0.6b-v3-int8"));
+        assert_eq!(live.speakers_identified_by, None);
+        assert_eq!(MeetingsRepository::get_transcript_provenance(&pool, "missing").await.unwrap(), None);
     }
 }
 

@@ -102,6 +102,22 @@ transcript and notes widths from issue #25. The existing wrapped toolbars and
 Export access remain in `components/meeting/MeetingHeader.tsx` and
 `MeetingDocument.tsx`. Narrow-content browser checks are still required.
 
+Transcript provenance pills in `MeetingHeader.tsx` show which pass and model
+produced the saved rows ("Live · Parakeet …" / "Enhanced · Whisper …"),
+"Enhancing recommended" (live rows with a recording folder; opens Enhance
+transcript), and whether speakers were identified (and by which engine; when
+not, it opens Identify speakers again). The native step that writes the rows
+records this on `meetings` (migration `20261028000000_add_transcript_provenance`):
+`api_save_transcript` records the live provider/model after the save,
+retranscription records `enhanced` and the model it loaded and clears
+`speakers_identified_by` in its row-replacing transaction, and
+`persist_speaker_labels` records the diarization engine in the label
+transaction. `api_get_transcript_provenance` reads it; rules live in
+`lib/transcript-provenance.ts` (`tests/lib/transcript-provenance.test.ts`).
+Older and imported meetings are NULL and show no pills rather than a guess.
+The live model is read from transcript settings at save time, so a save from
+crash recovery can name a model selected after that recording.
+
 ```text
 recording_commands.rs: start command
   -> initialize selected live diarizer before capture (blocking work off Tokio)
