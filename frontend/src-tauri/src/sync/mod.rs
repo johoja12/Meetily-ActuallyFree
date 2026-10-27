@@ -191,15 +191,23 @@ async fn run_pass(pool: &SqlitePool, config: &SyncConfig, voices: bool) -> anyho
         engine::export(pool, &library, device, &mut clock).await?;
     }
     write_device_info(&library, config)?;
-    // A moved recording changes its meeting's folder, so open pages reload it
-    // like an imported meeting.
-    let mut meeting_ids: Vec<String> = imported.meetings.into_iter().collect();
-    meeting_ids.extend(moved.into_iter().filter(|id| !meeting_ids.contains(id)).collect::<Vec<_>>());
     Ok(Imported {
-        meeting_ids,
+        meeting_ids: changed_meetings(imported.meetings, moved),
         library: imported.library,
         voices: voices_changed,
     })
+}
+
+/// Meetings open pages should reload: imported ones, then ones whose
+/// recording this pass moved (their folder changed), each once.
+fn changed_meetings(imported: impl IntoIterator<Item = String>, moved: Vec<String>) -> Vec<String> {
+    let mut ids: Vec<String> = imported.into_iter().collect();
+    for id in moved {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    ids
 }
 
 fn write_device_info(library: &Library, config: &SyncConfig) -> anyhow::Result<()> {
@@ -336,6 +344,13 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn moved_recordings_are_reported_with_imported_meetings() {
+        let ids = changed_meetings(vec!["a".to_string(), "b".to_string()], vec!["b".to_string(), "c".to_string()]);
+        assert_eq!(ids, vec!["a", "b", "c"]);
+        assert!(changed_meetings(Vec::<String>::new(), Vec::new()).is_empty());
+    }
 
     #[tokio::test]
     async fn enable_on_new_folder_creates_layout_and_publishes() {

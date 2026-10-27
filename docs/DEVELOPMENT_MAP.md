@@ -332,6 +332,14 @@ provisioned by `build-nsis-progress-plugin.ps1` with tauri-bundler's pinned URLs
 and SHA-1s, because the bundler recreates an incomplete toolset and would drop the
 progress plugin.
 
+### Logs
+
+`src-tauri/src/logging.rs` (started from `main.rs`) writes every log line to
+stderr and to `~/Library/Logs/Meetily/meetily.log` on macOS (`logs/` in the
+app data folder elsewhere), so a copy opened from Finder still leaves a log.
+The file is capped at 10 MB, then moves to `meetily.1.log`. Lines can name
+meetings and devices; the file stays local and is never part of the repo.
+
 ## 6. Tests, qualification, and historical notes
 
 macOS publication supports an explicitly labeled CI-qualified preview via

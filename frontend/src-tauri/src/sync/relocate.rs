@@ -7,6 +7,38 @@ use std::time::{Duration, SystemTime};
 
 use super::files::Library;
 
+/// Folders moved during this run, old path to new. A window that loaded a
+/// meeting before its recording moved can still hold the old path; commands
+/// that take a path from the window follow these instead of failing.
+static MOVES: std::sync::Mutex<Vec<(PathBuf, PathBuf)>> = std::sync::Mutex::new(Vec::new());
+
+pub fn record_move(from: &Path, to: &Path) {
+    if let Ok(mut moves) = MOVES.lock() {
+        moves.retain(|(old, _)| old != from);
+        moves.push((from.to_path_buf(), to.to_path_buf()));
+        // One folder moves per pass; this stays small for any real session.
+        if moves.len() > 1000 {
+            moves.remove(0);
+        }
+    }
+}
+
+/// `path`, or where it is now if it was inside a folder this run moved.
+pub fn follow_moves(path: &Path) -> PathBuf {
+    if path.exists() {
+        return path.to_path_buf();
+    }
+    let Ok(moves) = MOVES.lock() else { return path.to_path_buf() };
+    // Newest first, so a folder moved twice resolves to where it is now.
+    for (from, to) in moves.iter().rev() {
+        // strip_prefix compares whole components: "Meeting 10" is not inside "Meeting 1".
+        if let Ok(rest) = path.strip_prefix(from) {
+            return if rest.as_os_str().is_empty() { to.clone() } else { to.join(rest) };
+        }
+    }
+    path.to_path_buf()
+}
+
 /// No file in a folder may have changed for this long before it moves.
 pub const SETTLE: Duration = Duration::from_secs(120);
 
@@ -142,6 +174,7 @@ async fn relocate_unguarded(pool: &SqlitePool, library: &Library, now: SystemTim
             let _ = if renamed { std::fs::rename(&target, &folder) } else { std::fs::remove_dir_all(&target) };
             return Vec::new();
         }
+        record_move(&folder, &target);
         if !renamed {
             // The meeting points at the verified copy; the original is spare.
             let original = folder.clone();
@@ -228,6 +261,24 @@ mod tests {
         // A recording inside a library this device used before is shared with
         // devices still using it, so it is never moved out.
         assert!(shared.join("audio.mp4").is_file());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stale_paths_follow_a_move() {
+        let root = temp("follow");
+        let to = root.join("library/recordings/Meeting 1");
+        std::fs::create_dir_all(&to).unwrap();
+        std::fs::write(to.join("audio.mp4"), b"a").unwrap();
+        let from = root.join("old/Meeting 1");
+        record_move(&from, &to);
+        assert_eq!(follow_moves(&from.join("audio.mp4")), to.join("audio.mp4"));
+        assert_eq!(follow_moves(&from), to);
+        // A sibling whose name only starts the same is not inside the folder.
+        let sibling = root.join("old/Meeting 10/audio.mp4");
+        assert_eq!(follow_moves(&sibling), sibling);
+        // A path that still exists is left alone.
+        assert_eq!(follow_moves(&to.join("audio.mp4")), to.join("audio.mp4"));
         let _ = std::fs::remove_dir_all(root);
     }
 

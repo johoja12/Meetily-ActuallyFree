@@ -88,7 +88,9 @@ are skipped and read again on the next pass.
    them. Choosing a new library folder republishes every meeting there.
    Moved meetings are reported in `sync-imported` like imported ones, so an open
    meeting page reloads its folder path; native commands that take a folder from
-   the window (retranscription) prefer the meeting's current `folder_path`.
+   the window (retranscription) prefer the meeting's current `folder_path`,
+   and `relocate::follow_moves` maps a path inside a folder moved during this
+   run to its new place (retranscription, `read_audio_file`, waveforms).
 7. Worker: polls the outbox every 3 s and other devices every 30 s, runs on
    `sync_now`, and exports on quit (`flush`, bounded to 5 s). Emits
    `sync-status` and `sync-imported { meeting_ids, library, voices }`.

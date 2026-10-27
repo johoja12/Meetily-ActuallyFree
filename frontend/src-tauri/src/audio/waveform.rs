@@ -63,7 +63,8 @@ fn extract_peaks(file: &Path) -> Result<Vec<f32>, String> {
 
 #[tauri::command]
 pub async fn get_waveform_peaks(file_path: String) -> Result<Vec<f32>, String> {
-    let file = std::path::PathBuf::from(file_path);
+    // Library sync may have moved the recording since the window read its path.
+    let file = crate::sync::relocate::follow_moves(std::path::Path::new(&file_path));
     if !file.is_file() { return Err("Meeting audio is unavailable".into()); }
     static JOBS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
     let limiter = JOBS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1))).clone();

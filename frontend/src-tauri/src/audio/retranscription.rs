@@ -1016,7 +1016,7 @@ pub(crate) async fn current_meeting_folder(pool: &sqlx::SqlitePool, meeting_id: 
             info!("Using the meeting's current recording folder {folder} (the window had {given})");
             folder
         }
-        _ => given,
+        _ => crate::sync::relocate::follow_moves(Path::new(&given)).to_string_lossy().into_owned(),
     }
 }
 
