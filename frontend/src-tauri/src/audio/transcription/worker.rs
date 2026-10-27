@@ -211,8 +211,8 @@ pub fn start_transcription_task<R: Runtime>(
                                             .to_string(),
                                     }
                                 }
-                                // Mixed is for disk only — never STT'd.
-                                crate::audio::recording_state::DeviceType::Mixed => {
+                                // Mixed and raw mic are for disk only — never STT'd.
+                                crate::audio::recording_state::DeviceType::Mixed | crate::audio::recording_state::DeviceType::MicrophoneRaw => {
                                     chunks_completed_clone.fetch_add(1, Ordering::SeqCst);
                                     continue;
                                 }

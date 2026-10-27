@@ -51,6 +51,11 @@ pub struct MeetingMetadata {
     pub transcript_file: String,
     pub sample_rate: u32,
     pub status: String,  // "recording", "completed", "error"
+    /// How the saved `{track}.mp4` files were produced (`single_stream`: each
+    /// track is encoded once from lossless checkpoints); absent for recordings
+    /// made by older versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_layout: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,11 +69,15 @@ pub struct DeviceInfo {
 ///   - `audio.mp4`  mixed playback
 ///   - `mic.mp4`    microphone (You in personal mode; multiple voices in room mode)
 ///   - `system.mp4` remote / computer audio
+///   - `mic_raw.mp4` the mic before echo cancellation (macOS, only when it ran)
 pub struct RecordingSaver {
     mixed_saver: Option<Arc<AsyncMutex<IncrementalAudioSaver>>>,
     mic_saver: Option<Arc<AsyncMutex<IncrementalAudioSaver>>>,
     system_saver: Option<Arc<AsyncMutex<IncrementalAudioSaver>>>,
     room_microphone: bool,
+    /// Created on the first raw mic chunk, so recordings without echo
+    /// cancellation get no empty track.
+    mic_raw_saver: Arc<AsyncMutex<Option<IncrementalAudioSaver>>>,
     recordings_folder: Option<PathBuf>,
     meeting_folder: Option<PathBuf>,
     meeting_name: Option<String>,
@@ -86,6 +95,7 @@ impl RecordingSaver {
             mic_saver: None,
             system_saver: None,
             room_microphone: false,
+            mic_raw_saver: Arc::new(AsyncMutex::new(None)),
             recordings_folder: None,
             meeting_folder: None,
             meeting_name: None,
@@ -216,6 +226,8 @@ impl RecordingSaver {
         let mixed_saver = self.mixed_saver.clone();
         let mic_saver = self.mic_saver.clone();
         let system_saver = self.system_saver.clone();
+        let mic_raw_saver = self.mic_raw_saver.clone();
+        let meeting_folder = self.meeting_folder.clone();
         let save_audio = auto_save;
 
         if let Some(mut receiver) = self.chunk_receiver.take() {
@@ -228,10 +240,28 @@ impl RecordingSaver {
                         continue;
                     }
 
+                    if chunk.device_type == DeviceType::MicrophoneRaw {
+                        let mut raw = mic_raw_saver.lock().await;
+                        if raw.is_none() {
+                            *raw = meeting_folder.clone().and_then(|folder| {
+                                IncrementalAudioSaver::new_track(folder, 48000, "mic_raw")
+                                    .map_err(|e| error!("Failed to create raw mic track: {}", e))
+                                    .ok()
+                            });
+                        }
+                        if let Some(saver) = raw.as_mut() {
+                            if let Err(e) = saver.add_chunk(chunk) {
+                                error!("Failed to add chunk to raw mic track: {}", e);
+                            }
+                        }
+                        continue;
+                    }
+
                     let target = match chunk.device_type {
                         DeviceType::Mixed => mixed_saver.as_ref(),
                         DeviceType::Microphone => mic_saver.as_ref(),
                         DeviceType::System => system_saver.as_ref(),
+                        DeviceType::MicrophoneRaw => None,
                     };
 
                     if let Some(saver_arc) = target {
@@ -285,25 +315,7 @@ impl RecordingSaver {
         }
 
         // Create initial metadata
-        let metadata = MeetingMetadata {
-            version: "1.0".to_string(),
-            room_microphone: self.room_microphone,
-            meeting_id: None, // Will be set by backend
-            meeting_name: Some(meeting_name.to_string()),
-            created_at: chrono::Utc::now().to_rfc3339(),
-            completed_at: None,
-            duration_seconds: None,
-            devices: DeviceInfo {
-                microphone: None,  // Could be enhanced to store actual device names
-                system_audio: None,
-            },
-            audio_file: if create_checkpoints { "audio.mp4".to_string() } else { "".to_string() },
-            mic_audio_file: create_checkpoints.then(|| "mic.mp4".to_string()),
-            system_audio_file: create_checkpoints.then(|| "system.mp4".to_string()),
-            transcript_file: "transcripts.json".to_string(),
-            sample_rate: 48000,
-            status: "recording".to_string(),
-        };
+        let metadata = initial_metadata(meeting_name, create_checkpoints, self.room_microphone);
 
         // Write initial metadata.json
         self.write_metadata(&meeting_folder, &metadata)?;
@@ -459,11 +471,23 @@ impl RecordingSaver {
             }
         }
 
-        let final_audio_path = finalize_track(&self.mixed_saver, "audio (mixed)", true)
-            .await?
-            .ok_or_else(|| "Mixed audio path missing".to_string())?;
-        let mic_audio_path = finalize_track(&self.mic_saver, "mic", false).await?;
-        let system_audio_path = finalize_track(&self.system_saver, "system", false).await?;
+        // Each finalize encodes its track to AAC once (about 0.35 s per minute
+        // of audio per track); run them concurrently so stop time does not grow
+        // with the number of tracks.
+        let (mixed, mic, system) = tokio::join!(
+            finalize_track(&self.mixed_saver, "audio (mixed)", true),
+            finalize_track(&self.mic_saver, "mic", false),
+            finalize_track(&self.system_saver, "system", false),
+        );
+        let final_audio_path = mixed?.ok_or_else(|| "Mixed audio path missing".to_string())?;
+        let mic_audio_path = mic?;
+        let system_audio_path = system?;
+        if let Some(raw) = self.mic_raw_saver.lock().await.as_mut() {
+            match raw.finalize().await {
+                Ok(path) => info!("✅ Finalized raw mic: {}", path.display()),
+                Err(e) => warn!("⚠️ Optional track raw mic not finalized: {e}"),
+            }
+        }
 
         // Save final transcripts.json with validation
         if let Some(folder) = &self.meeting_folder {
@@ -564,6 +588,34 @@ impl Default for RecordingSaver {
     }
 }
 
+/// metadata.json of a new recording. Its tracks are saved as lossless checkpoints
+/// that each become one AAC stream, whether the recording stops normally or is
+/// recovered after a crash, so the layout is recorded from the start. A save cut
+/// short after the encode (timeout, failed transcript write) is still marked.
+fn initial_metadata(meeting_name: &str, create_checkpoints: bool, room_microphone: bool) -> MeetingMetadata {
+    MeetingMetadata {
+        version: "1.0".to_string(),
+        room_microphone,
+        meeting_id: None,  // Will be set by backend
+        meeting_name: Some(meeting_name.to_string()),
+        created_at: chrono::Utc::now().to_rfc3339(),
+        completed_at: None,
+        duration_seconds: None,
+        devices: DeviceInfo {
+            microphone: None,  // Could be enhanced to store actual device names
+            system_audio: None,
+        },
+        audio_file: if create_checkpoints { "audio.mp4".to_string() } else { "".to_string() },
+        mic_audio_file: create_checkpoints.then(|| "mic.mp4".to_string()),
+        system_audio_file: create_checkpoints.then(|| "system.mp4".to_string()),
+        transcript_file: "transcripts.json".to_string(),
+        sample_rate: 48000,
+        status: "recording".to_string(),
+        audio_layout: create_checkpoints
+            .then(|| super::incremental_saver::AUDIO_LAYOUT_SINGLE_STREAM.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -597,6 +649,24 @@ mod tests {
             sequence_id: 1,
             speaker: Some("You".to_string()),
         }
+    }
+
+    #[test]
+    fn recordings_with_audio_are_marked_single_stream_from_the_start() {
+        let metadata = initial_metadata("Standup", true, false);
+        assert_eq!(
+            metadata.audio_layout.as_deref(),
+            Some(super::super::incremental_saver::AUDIO_LAYOUT_SINGLE_STREAM)
+        );
+        assert_eq!(metadata.audio_file, "audio.mp4");
+        assert_eq!(metadata.mic_audio_file.as_deref(), Some("mic.mp4"));
+        assert_eq!(metadata.system_audio_file.as_deref(), Some("system.mp4"));
+        let json = serde_json::to_value(&metadata).unwrap();
+        assert_eq!(json["audio_layout"], "single_stream");
+
+        let transcripts_only = initial_metadata("Standup", false, false);
+        assert_eq!(transcripts_only.audio_layout, None);
+        assert!(serde_json::to_value(&transcripts_only).unwrap().get("audio_layout").is_none());
     }
 
     #[test]

@@ -91,3 +91,7 @@ frontend/src-tauri/nsis-progress/*.obj
 frontend/MeetilyProgress.obj
 
 CLAUDE.md
+
+# DTLN-aec models: fetched and verified by build/dtln_aec.rs, never committed.
+/frontend/src-tauri/resources/dtln-aec/*.onnx
+/frontend/src-tauri/resources/dtln-aec/*.part
