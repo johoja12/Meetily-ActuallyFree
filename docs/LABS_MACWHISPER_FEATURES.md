@@ -24,9 +24,16 @@ used:
   background, and matching unnamed speakers in other meetings get the name
   with an Undo notice (see "Automatic learning and matching" below). Settings >
   Labs shows "Learning voices…" and an "Apply voices to past meetings" button.
-  A Voice panel on each contact's page also learns a voice
+  A Voice panel on each contact's page (`ContactVoicePanel`) also learns a voice
   from all their recent meetings (up to twelve), updates it the same way so new
-  meetings count, or forgets it; the speaker card on a meeting page adds that
+  meetings count, or forgets it. It shows whether a voice is saved even with the
+  Labs switch off, and learning then turns the switch on (`learnVoiceForContact`,
+  which turns it back off if learning fails). Before learning it reads
+  `voice_learning_candidates(person_id)`: meetings where you named the contact
+  (voice-matched ones never count), how many still have call audio, and whether
+  the speaker models are downloaded; `voiceLearnBlocker` turns that into the
+  reason Learn is disabled. The Contacts list marks contacts with a saved voice,
+  filters by Voice saved / No voice, and offers Learn or Update voice per row; the speaker card on a meeting page adds that
   meeting's audio (Remember voice, or Update voice once one exists). A profile
   keeps each meeting's share, so learning from a meeting again replaces its
   share instead of counting it twice; profiles saved before shares were kept

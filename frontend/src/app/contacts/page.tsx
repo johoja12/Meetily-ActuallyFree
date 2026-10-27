@@ -2,12 +2,13 @@
 
 /**
  * Everyone you've named in a meeting, plus people you added yourself. Search,
- * sort, and tidy up: add, edit, merge duplicates, delete.
+ * sort, and tidy up: add, edit, merge duplicates, delete. A fingerprint marks
+ * contacts whose voice Meetily knows; "No voice" finds the rest to learn.
  */
 import { Suspense, useEffect, useMemo, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { toast } from 'sonner';
-import { ArrowUpRight, Contact, GitMerge, MoreHorizontal, Pencil, Search, Trash2, UserPlus, X } from 'lucide-react';
+import { ArrowUpRight, Contact, Fingerprint, GitMerge, MoreHorizontal, Pencil, Search, Trash2, UserPlus, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useWorkspace } from '@/contexts/WorkspaceContext';
 import { Avatar } from '@/components/ui/avatar';
@@ -29,6 +30,9 @@ import { ContactDialog } from '@/components/people/ContactDialog';
 import { MergeContactsDialog } from '@/components/people/MergeContactsDialog';
 import { announceChange, deletePerson, type ContactRow } from '@/lib/workspace-api';
 import { formatRelativePast, parseDate } from '@/lib/dates';
+import { useLabs } from '@/hooks/useLabs';
+import { useVoiceProfiles } from '@/hooks/useVoiceProfiles';
+import { describeVoiceError, describeVoiceSource, filterByVoice, learnVoiceForContact, type VoiceFilter } from '@/lib/voice-profiles';
 
 type Sort = 'recent' | 'name' | 'meetings';
 
@@ -42,6 +46,24 @@ function ContactsInner() {
   const [editing, setEditing] = useState<ContactRow | null | 'new'>(null);
   const [merging, setMerging] = useState<string[] | null>(null);
   const [deleting, setDeleting] = useState<string[] | null>(null);
+  const [voiceFilter, setVoiceFilter] = useState<VoiceFilter>('all');
+  const { labs } = useLabs();
+  const voices = useVoiceProfiles();
+  const voiced = useMemo(() => new Set((voices ?? []).map((voice) => voice.person_id)), [voices]);
+
+  const learnVoice = async (person: ContactRow) => {
+    const updating = voiced.has(person.id);
+    const pending = toast.loading(`${updating ? 'Updating' : 'Learning'} ${person.displayName}'s voice…`);
+    try {
+      const { profile, turnedOn } = await learnVoiceForContact(person.id, labs.voiceProfiles);
+      toast.success(`${updating ? 'Updated' : 'Learned'} ${person.displayName}'s voice`, {
+        id: pending,
+        description: `From ${describeVoiceSource(profile)}.${turnedOn ? ' Voice profiles are now on in Settings > Labs.' : ''}`,
+      });
+    } catch (error) {
+      toast.error(`Could not ${updating ? 'update' : 'learn'} ${person.displayName}'s voice`, { id: pending, description: describeVoiceError(error) });
+    }
+  };
 
   // "New contact" from the command bar or home page.
   useEffect(() => {
@@ -53,19 +75,20 @@ function ContactsInner() {
 
   const shown = useMemo(() => {
     const needle = query.trim().toLowerCase();
+    const candidates = filterByVoice(people, voices, voiceFilter);
     const list = needle
-      ? people.filter((person) =>
+      ? candidates.filter((person) =>
           [person.displayName, person.role, person.company, person.email]
             .filter(Boolean)
             .some((value) => value!.toLowerCase().includes(needle)),
         )
-      : [...people];
+      : [...candidates];
     return list.sort((a, b) => {
       if (sort === 'name') return a.displayName.localeCompare(b.displayName);
       if (sort === 'meetings') return b.meetingCount - a.meetingCount || a.displayName.localeCompare(b.displayName);
       return (b.lastSeenAt ?? '').localeCompare(a.lastSeenAt ?? '') || a.displayName.localeCompare(b.displayName);
     });
-  }, [people, query, sort]);
+  }, [people, query, sort, voices, voiceFilter]);
 
   useEffect(() => {
     const alive = new Set(people.map((person) => person.id));
@@ -110,6 +133,16 @@ function ContactsInner() {
               aria-label="Search contacts"
             />
           </div>
+          <Select value={voiceFilter} onValueChange={(value) => setVoiceFilter(value as VoiceFilter)}>
+            <SelectTrigger className="w-36" aria-label="Voice">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All contacts</SelectItem>
+              <SelectItem value="voice">Voice saved</SelectItem>
+              <SelectItem value="none">No voice</SelectItem>
+            </SelectContent>
+          </Select>
           <Select value={sort} onValueChange={(value) => setSort(value as Sort)}>
             <SelectTrigger className="w-44" aria-label="Sort">
               <SelectValue />
@@ -142,7 +175,11 @@ function ContactsInner() {
               }
             />
           ) : shown.length === 0 ? (
-            <EmptyState icon={<Search />} title="No one matches" description="Try part of a name, a company or an email." />
+            <EmptyState
+              icon={<Search />}
+              title="No one matches"
+              description={query.trim() ? 'Try part of a name, a company or an email.' : voiceFilter === 'voice' ? 'No contact has a saved voice yet. Open a contact to learn theirs.' : 'Every contact has a saved voice.'}
+            />
           ) : (
             <ul className="af-appear overflow-hidden rounded-xl border border-af-border bg-af-panel-2/40">
               {shown.map((person) => {
@@ -168,7 +205,14 @@ function ContactsInner() {
                     <span className="flex min-w-0 items-center gap-3">
                       <Avatar name={person.displayName} size="md" />
                       <span className="min-w-0">
-                        <span className="block truncate text-[13px] font-medium text-af-text">{person.displayName}</span>
+                        <span className="flex min-w-0 items-center gap-1.5">
+                          <span className="truncate text-[13px] font-medium text-af-text">{person.displayName}</span>
+                          {voiced.has(person.id) && (
+                            <Fingerprint aria-label="Voice saved" className="h-3.5 w-3.5 shrink-0 text-af-accent">
+                              <title>Voice saved</title>
+                            </Fingerprint>
+                          )}
+                        </span>
                         <span className="block truncate text-xs text-af-text-3">
                           {[person.role, person.company].filter(Boolean).join(' · ') || person.email || `${person.meetingCount} meeting${person.meetingCount === 1 ? '' : 's'}`}
                         </span>
@@ -204,6 +248,10 @@ function ContactsInner() {
                         <DropdownMenuItem onSelect={() => setEditing(person)}>
                           <Pencil />
                           Edit
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onSelect={() => void learnVoice(person)}>
+                          <Fingerprint />
+                          {voiced.has(person.id) ? 'Update voice' : 'Learn voice'}
                         </DropdownMenuItem>
                         <DropdownMenuItem onSelect={() => setMerging([person.id])}>
                           <GitMerge />

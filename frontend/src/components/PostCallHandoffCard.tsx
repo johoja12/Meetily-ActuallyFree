@@ -1,6 +1,6 @@
 'use client';
 
-import type { ReactNode } from 'react';
+import { useRef, useState, type PointerEvent, type ReactNode } from 'react';
 import { Users } from 'lucide-react';
 import { Spinner } from '@/components/ui/spinner';
 import { RecordingCardSlot } from '@/components/RecordingCardSlot';
@@ -33,6 +33,8 @@ export function PostCallHandoffCard({
   placement?: 'dock' | 'top-left';
   onDismiss?: () => void;
 }) {
+  // Before the dialog return so hook order is stable as busy flips.
+  const drag = useDragOffset();
   if (centered && !busy) {
     return (
       <Dialog open onOpenChange={(open) => { if (!open) onDismiss?.(); }}>
@@ -76,8 +78,64 @@ export function PostCallHandoffCard({
       </div>
   );
   return compact ? (
-    <div className="pointer-events-none fixed left-4 top-4 z-[70] w-[min(20rem,calc(100vw-2rem))]">
+    <div
+      className={cn(
+        'fixed left-4 top-4 z-[70] w-[min(20rem,calc(100vw-2rem))] touch-none select-none',
+        drag.dragging ? '[&>*]:cursor-grabbing' : '[&>*]:cursor-grab',
+      )}
+      style={{ transform: `translate(${drag.offset.x}px, ${drag.offset.y}px)` }}
+      onPointerDown={drag.onPointerDown}
+      onPointerMove={drag.onPointerMove}
+      onPointerUp={drag.onPointerUp}
+      onPointerCancel={drag.onPointerUp}
+    >
       {content}
     </div>
   ) : <RecordingCardSlot>{content}</RecordingCardSlot>;
+}
+
+// Module scope so the card keeps where the user put it when it remounts, e.g.
+// after "Open this meeting" navigates while background processing continues.
+let lastOffset = { x: 0, y: 0 };
+
+function clampToViewport(el: HTMLElement, x: number, y: number) {
+  // The card is anchored at left/top 16px; keep at least that gutter on every side.
+  const gutter = 16;
+  const { width, height } = el.getBoundingClientRect();
+  return {
+    x: Math.min(Math.max(x, 0), Math.max(0, window.innerWidth - width - gutter * 2)),
+    y: Math.min(Math.max(y, 0), Math.max(0, window.innerHeight - height - gutter * 2)),
+  };
+}
+
+function useDragOffset() {
+  const [offset, setOffset] = useState(lastOffset);
+  const [dragging, setDragging] = useState(false);
+  const start = useRef<{ pointerX: number; pointerY: number; x: number; y: number } | null>(null);
+
+  const onPointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    // Links and buttons (Open this meeting, Cancel) keep their normal click behavior.
+    if (event.button !== 0 || (event.target as HTMLElement).closest('a, button, input, select, textarea')) return;
+    start.current = { pointerX: event.clientX, pointerY: event.clientY, ...offset };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDragging(true);
+  };
+  const onPointerMove = (event: PointerEvent<HTMLDivElement>) => {
+    const origin = start.current;
+    if (!origin) return;
+    const next = clampToViewport(
+      event.currentTarget,
+      origin.x + event.clientX - origin.pointerX,
+      origin.y + event.clientY - origin.pointerY,
+    );
+    lastOffset = next;
+    setOffset(next);
+  };
+  const onPointerUp = (event: PointerEvent<HTMLDivElement>) => {
+    if (!start.current) return;
+    start.current = null;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+    setDragging(false);
+  };
+  return { offset, dragging, onPointerDown, onPointerMove, onPointerUp };
 }

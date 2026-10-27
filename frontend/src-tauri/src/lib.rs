@@ -660,6 +660,7 @@ pub fn run() {
             diarization::voice_profiles::enroll_voice_profile,
             diarization::voice_profiles::enroll_person_voice,
             diarization::voice_profiles::list_voice_profiles,
+            diarization::voice_profiles::voice_learning_candidates,
             diarization::voice_profiles::delete_voice_profile,
             diarization::voice_learning::undo_voice_matches,
             diarization::voice_learning::apply_voices_to_past_meetings,
