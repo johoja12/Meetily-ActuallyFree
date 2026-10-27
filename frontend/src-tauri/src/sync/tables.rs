@@ -28,6 +28,7 @@ pub const TABLES: &[TableSpec] = &[
     TableSpec { name: "meeting_whisper_vocabulary", key: &["meeting_id"], meeting: Some("meeting_id"), parent: false },
     TableSpec { name: "transcript_chunks", key: &["meeting_id"], meeting: Some("meeting_id"), parent: false },
     TableSpec { name: "voice_speaker_matches", key: &["meeting_id", "original_label", "person_id"], meeting: Some("meeting_id"), parent: false },
+    TableSpec { name: "meeting_calendar_events", key: &["meeting_id"], meeting: Some("meeting_id"), parent: false },
     TableSpec { name: "people", key: &["id"], meeting: None, parent: true },
     TableSpec { name: "groups", key: &["id"], meeting: None, parent: true },
     TableSpec { name: "sync_redirects", key: &["kind", "from_id"], meeting: None, parent: false },

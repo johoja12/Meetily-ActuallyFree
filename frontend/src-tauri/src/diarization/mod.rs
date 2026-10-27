@@ -749,6 +749,10 @@ pub async fn rename_meeting_speaker(
     .await
     .map_err(|e| format!("Failed to rename speaker: {}", e))?;
     voice_learning::after_speaker_edit(pool, edit, &outcome.speaker).await;
+    // A name picked from the meeting's invite brings that attendee's email.
+    if let Err(error) = crate::calendar::link::fill_attendee_emails(pool, &meeting_id).await {
+        log::warn!("Could not fill contact emails from the invite: {error}");
+    }
     log::info!(
         "🧑‍🤝‍🧑 Renamed speaker '{}' → '{}' across {} segments of meeting {}",
         from, outcome.speaker, outcome.count, meeting_id
@@ -787,6 +791,10 @@ pub async fn reassign_transcript_speaker(
     .await
     .map_err(|e| format!("Failed to move this line: {}", e))?;
     voice_learning::after_speaker_edit(pool, edit, &outcome.speaker).await;
+    // A name picked from the meeting's invite brings that attendee's email.
+    if let Err(error) = crate::calendar::link::fill_attendee_emails(pool, &meeting_id).await {
+        log::warn!("Could not fill contact emails from the invite: {error}");
+    }
     Ok(MeetingSpeakerRenameResult {
         speaker: outcome.speaker,
         count: outcome.count,

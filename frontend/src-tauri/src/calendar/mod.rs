@@ -1,6 +1,7 @@
 //! Opt-in local calendar reading. A single bounded worker owns EventKit calls;
 //! reminders are user prompts, never authority to start or stop capture.
 pub mod attendees;
+pub mod link;
 pub mod saved;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
