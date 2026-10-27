@@ -238,15 +238,15 @@ export function DiarizationSettings() {
 
       <label className="mb-4 flex items-start justify-between gap-4 rounded-xl border border-af-border bg-af-panel px-4 py-3">
         <span className="min-w-0">
-          <span className="block text-sm font-medium text-af-text">Identify speakers automatically after each recording</span>
+          <span className="block text-sm font-medium text-af-text">Transcribe and identify speakers after each recording</span>
           <span className="mt-0.5 block text-xs text-af-text-3">
-            Skips the question after a recording and runs it as if you clicked Auto-detect, detecting how many people spoke.
+            When a recording ends, re-transcribes it with the post-call model and detects who spoke, without asking. Same as clicking Auto-detect &amp; continue.
           </span>
         </span>
         <Switch
           checked={autoIdentify}
           onCheckedChange={(value) => writeAutoIdentifySpeakers(value)}
-          aria-label="Identify speakers automatically after each recording"
+          aria-label="Transcribe and identify speakers after each recording"
         />
       </label>
 
