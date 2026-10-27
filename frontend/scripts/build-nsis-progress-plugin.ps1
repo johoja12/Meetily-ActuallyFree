@@ -20,14 +20,26 @@ $vcvars = Join-Path $vsInstall "VC\Auxiliary\Build\vcvars32.bat"
 foreach ($required in @($ProgressMainBinary, $source, $vcvars)) {
   if (-not (Test-Path -LiteralPath $required)) { throw "NSIS progress input missing: $required" }
 }
-if (-not (Test-Path -LiteralPath $nsis)) {
+# Recreate the toolset exactly as tauri-bundler does (same URLs and SHA-1s). The
+# bundler deletes and re-downloads this directory when nsis_tauri_utils.dll is
+# missing, which would also remove the progress plugin installed below.
+$tauriUtils = Join-Path $nsis "Plugins\x86-unicode\additional\nsis_tauri_utils.dll"
+function Get-VerifiedDownload([string]$Uri, [string]$OutFile, [string]$Sha1) {
+  New-Item -ItemType Directory -Force -Path (Split-Path $OutFile -Parent) | Out-Null
+  Invoke-WebRequest -Uri $Uri -OutFile $OutFile
+  $actual = (Get-FileHash -LiteralPath $OutFile -Algorithm SHA1).Hash
+  if ($actual -ne $Sha1) { throw "SHA-1 mismatch for ${Uri}: $actual" }
+}
+if (-not (Test-Path -LiteralPath (Join-Path $nsis "makensis.exe"))) {
+  if (Test-Path -LiteralPath $nsis) { Remove-Item -LiteralPath $nsis -Recurse -Force }
   $archive = Join-Path $repo ".build-tools\nsis-3.11.zip"
-  $download = "https://github.com/NSIS-Dev/nsis/releases/download/v3.11/nsis-3.11.zip"
-  New-Item -ItemType Directory -Force -Path (Split-Path $archive -Parent) | Out-Null
-  Invoke-WebRequest -Uri $download -OutFile $archive
+  Get-VerifiedDownload "https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.11/nsis-3.11.zip" $archive "EF7FF767E5CBD9EDD22ADD3A32C9B8F4500BB10D"
   Expand-Archive -LiteralPath $archive -DestinationPath (Split-Path $nsis -Parent) -Force
   $expanded = Join-Path (Split-Path $nsis -Parent) "nsis-3.11"
   if (Test-Path -LiteralPath $expanded) { Move-Item -LiteralPath $expanded -Destination $nsis }
+}
+if (-not (Test-Path -LiteralPath $tauriUtils)) {
+  Get-VerifiedDownload "https://github.com/tauri-apps/nsis-tauri-utils/releases/download/nsis_tauri_utils-v0.5.3/nsis_tauri_utils.dll" $tauriUtils "75197FEE3C6A814FE035788D1C34EAD39349B860"
 }
 New-Item -ItemType Directory -Force -Path $build | Out-Null
 New-Item -ItemType Directory -Force -Path $pluginDir | Out-Null
