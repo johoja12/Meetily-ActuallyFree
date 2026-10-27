@@ -633,6 +633,11 @@ async fn delete_meeting_with_transaction(
         .execute(&mut *transaction)
         .await?;
 
+    sqlx::query("DELETE FROM self_voice_matches WHERE meeting_id = ?")
+        .bind(meeting_id)
+        .execute(&mut *transaction)
+        .await?;
+
     sqlx::query("DELETE FROM meeting_calendar_events WHERE meeting_id = ?")
         .bind(meeting_id)
         .execute(&mut *transaction)

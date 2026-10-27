@@ -1,6 +1,8 @@
 //! Opt-in WeSpeaker voice profiles for named people. A profile is enrolled only
 //! from user-labeled, non-overlapping system-track turns; anonymous diarization
-//! channel numbers are never treated as durable identities.
+//! channel numbers are never treated as durable identities. Your own voice is
+//! the exception to the track: it is learned from your "You" lines on the
+//! microphone track, under the reserved id `SELF_ID`.
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -22,6 +24,21 @@ const LEARN_TURNS: usize = 20;
 const MATCH_TURNS: usize = 8;
 /// Meetings a voice is learned from; the oldest share drops off first.
 const MAX_SOURCES: usize = 12;
+
+/// Your own voice. You have no contact row, so this id stands in for one in
+/// the voice file; matches it applies are kept in `self_voice_matches`.
+pub const SELF_ID: &str = "self";
+/// The label your lines carry, from the microphone track or "This is me".
+pub(crate) const SELF_LABEL: &str = "You";
+
+pub(crate) fn is_self_label(label: &str) -> bool {
+    label.trim().eq_ignore_ascii_case(SELF_LABEL)
+}
+
+/// SQL true when `column` is "You" alone or a component of a combined label.
+pub(crate) fn self_label_sql(column: &str) -> String {
+    format!("(' + ' || lower(trim({column})) || ' + ') LIKE '% + you + %'")
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VoiceProfile {
@@ -305,7 +322,14 @@ fn save(profiles: &[VoiceProfile]) -> Result<()> {
     Ok(())
 }
 
+/// Contacts' voices. Your own is left out: these callers match speakers on the
+/// call track, where your voice can only be echo of your microphone.
 pub fn load_for_matching() -> Result<Vec<VoiceProfile>> {
+    Ok(load_all_for_matching()?.into_iter().filter(|profile| profile.person_id != SELF_ID).collect())
+}
+
+/// Every voice, yours included, for callers that know which track they match.
+pub(crate) fn load_all_for_matching() -> Result<Vec<VoiceProfile>> {
     if !enabled() { return Ok(Vec::new()); }
     let _guard = PROFILE_WRITE.lock().map_err(|_| anyhow::anyhow!("Voice profile lock poisoned"))?;
     Ok(load()?.into_iter().filter(|profile| profile.model == MODEL && profile.embedding.len() == 128).collect())
@@ -387,6 +411,12 @@ pub(crate) fn call_track(folder: &Path) -> PathBuf {
     )
 }
 
+/// The recording a speaker's voice is learned from: the microphone for you,
+/// otherwise the call track.
+fn learn_track(folder: &Path, speaker: &str) -> PathBuf {
+    if is_self_label(speaker) { folder.join("mic.mp4") } else { call_track(folder) }
+}
+
 /// Every saved line's label and recording-relative span, in seconds.
 pub(crate) type TranscriptTurn = (String, Option<f64>, Option<f64>);
 
@@ -446,9 +476,15 @@ pub(crate) fn embed_label_means(track: &Path, turns: &HashMap<String, Vec<(f64, 
 /// True when this contact's appearance in the meeting was named by a voice
 /// match rather than by the user. Such meetings never train their voice.
 pub(crate) async fn is_automatic(pool: &SqlitePool, meeting_id: &str, person_id: &str) -> bool {
-    sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM voice_speaker_matches WHERE meeting_id = ? AND person_id = ? AND status = 'applied'",
-    ).bind(meeting_id).bind(person_id).fetch_one(pool).await.map(|count| count > 0).unwrap_or(false)
+    let query = if person_id == SELF_ID {
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM self_voice_matches WHERE meeting_id = ? AND status = 'applied'")
+            .bind(meeting_id)
+    } else {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM voice_speaker_matches WHERE meeting_id = ? AND person_id = ? AND status = 'applied'",
+        ).bind(meeting_id).bind(person_id)
+    };
+    query.fetch_one(pool).await.map(|count| count > 0).unwrap_or(false)
 }
 
 /// Learns a voice after the user names a speaker. Quietly does nothing when
@@ -456,9 +492,12 @@ pub(crate) async fn is_automatic(pool: &SqlitePool, meeting_id: &str, person_id:
 /// match, or the meeting has no clear audio of them.
 pub(crate) async fn learn_tagged_speaker(pool: &SqlitePool, meeting_id: &str, speaker: &str) -> Option<VoiceProfileInfo> {
     if !enabled() || !super::pyannote_models_available() { return None; }
-    let person: Option<String> = sqlx::query_scalar(
-        "SELECT person_id FROM person_speakers WHERE meeting_id = ? AND speaker_label = ?",
-    ).bind(meeting_id).bind(speaker).fetch_optional(pool).await.ok().flatten();
+    let person: Option<String> = if is_self_label(speaker) {
+        Some(SELF_ID.to_string())
+    } else {
+        sqlx::query_scalar("SELECT person_id FROM person_speakers WHERE meeting_id = ? AND speaker_label = ?")
+            .bind(meeting_id).bind(speaker).fetch_optional(pool).await.ok().flatten()
+    };
     if let Some(person) = &person {
         if is_automatic(pool, meeting_id, person).await { return None; }
     }
@@ -524,11 +563,50 @@ async fn meeting_share(
     if !super::pyannote_models_available() {
         return Err(Unavailable("Voice profiles need the speaker models. Download them in Settings > Transcription.".into()));
     }
+    let own = is_self_label(speaker);
+    let (person_id, name) = if own {
+        (SELF_ID.to_string(), SELF_LABEL.to_string())
+    } else {
+        contact_for_speaker(pool, meeting_id, speaker).await?
+    };
+    let folder: Option<String> = sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
+        .bind(meeting_id).fetch_optional(pool).await.map_err(failed)?.flatten();
+    let folder = folder.ok_or_else(|| Meeting("This meeting has no saved audio.".into()))?;
+    let track = learn_track(Path::new(&folder), speaker);
+    if !track.is_file() {
+        return Err(Meeting(if own {
+            "This meeting has no saved microphone audio to learn your voice from. Recordings made with Save audio on keep it; imported files do not.".into()
+        } else {
+            "This meeting has no separate call audio to learn from. Recordings made with Save audio on keep it; imported files do not.".into()
+        }));
+    }
+    let rows = transcript_turns(pool, meeting_id).await.map_err(failed)?;
+    let turns = spread(&clean_turns(&rows, speaker), LEARN_TURNS);
+    let no_clear_turn = || {
+        let who = if own { "You have".to_string() } else { format!("{name} has") };
+        Meeting(format!("{who} no clear turn of 2 to 15 seconds, with nobody talking over them, in this meeting."))
+    };
+    if turns.is_empty() {
+        return Err(no_clear_turn());
+    }
+    let vectors = tokio::task::spawn_blocking(move || embed_turns(&track, &turns))
+        .await.map_err(|error| Meeting(error.to_string()))?.map_err(|error| Meeting(error.to_string()))?;
+    if vectors.is_empty() {
+        return Err(no_clear_turn());
+    }
+    Ok((person_id, name, share_of(meeting_id, &vectors)))
+}
+
+/// The contact a named speaker in a meeting is linked to, linking it first
+/// when only the transcript carries the name.
+async fn contact_for_speaker(pool: &SqlitePool, meeting_id: &str, speaker: &str) -> Result<(String, String), EnrollError> {
+    use EnrollError::Meeting;
+    let failed = |error: sqlx::Error| Meeting(error.to_string());
     if !crate::database::repositories::person::is_person_name(speaker) {
         if speaker.trim().to_ascii_lowercase().starts_with("speaker ") {
             return Err(Meeting("Name this speaker before learning their voice.".into()));
         }
-        return Err(Meeting("Only a named speaker on the call can have a voice profile.".into()));
+        return Err(Meeting("Only a named speaker on the call, or you, can have a voice profile.".into()));
     }
     let mut identity: Option<(String, String)> = sqlx::query_as(
         "SELECT p.id, p.display_name FROM person_speakers ps JOIN people p ON p.id = ps.person_id \
@@ -551,32 +629,7 @@ async fn meeting_share(
              WHERE ps.meeting_id = ? AND ps.speaker_label = ?",
         ).bind(meeting_id).bind(speaker).fetch_optional(pool).await.map_err(failed)?;
     }
-    let (person_id, name) = identity.ok_or_else(|| Meeting("Could not link this named speaker to a contact.".into()))?;
-    let folder: Option<String> = sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
-        .bind(meeting_id).fetch_optional(pool).await.map_err(failed)?.flatten();
-    let folder = folder.ok_or_else(|| Meeting("This meeting has no saved audio.".into()))?;
-    let track = call_track(Path::new(&folder));
-    if !track.is_file() {
-        return Err(Meeting(
-            "This meeting has no separate call audio to learn from. Recordings made with Save audio on keep it; imported files do not.".into(),
-        ));
-    }
-    let rows = transcript_turns(pool, meeting_id).await.map_err(failed)?;
-    let turns = spread(&clean_turns(&rows, speaker), LEARN_TURNS);
-    let no_clear_turn = || {
-        Meeting(format!(
-        "{name} has no clear turn of 2 to 15 seconds, with nobody talking over them, in this meeting."
-    ))
-    };
-    if turns.is_empty() {
-        return Err(no_clear_turn());
-    }
-    let vectors = tokio::task::spawn_blocking(move || embed_turns(&track, &turns))
-        .await.map_err(|error| Meeting(error.to_string()))?.map_err(|error| Meeting(error.to_string()))?;
-    if vectors.is_empty() {
-        return Err(no_clear_turn());
-    }
-    Ok((person_id, name, share_of(meeting_id, &vectors)))
+    identity.ok_or_else(|| Meeting("Could not link this named speaker to a contact.".into()))
 }
 
 /// Adds (or, with `replace`, rebuilds from) meeting shares of a contact's
@@ -619,8 +672,13 @@ pub async fn enroll_voice_profile(
     let info = store_shares(&person_id, &name, vec![share], false)?;
     // Remembering a voice from an automatically named speaker confirms the
     // name, so this meeting becomes an ordinary source of their voice.
-    let _ = sqlx::query("DELETE FROM voice_speaker_matches WHERE meeting_id = ? AND person_id = ? AND status = 'applied'")
-        .bind(&meeting_id).bind(&person_id).execute(pool).await;
+    let confirm = if person_id == SELF_ID {
+        sqlx::query("DELETE FROM self_voice_matches WHERE meeting_id = ? AND status = 'applied'").bind(&meeting_id)
+    } else {
+        sqlx::query("DELETE FROM voice_speaker_matches WHERE meeting_id = ? AND person_id = ? AND status = 'applied'")
+            .bind(&meeting_id).bind(&person_id)
+    };
+    let _ = confirm.execute(pool).await;
     // A changed voice can name unnamed speakers in any meeting.
     super::voice_learning::check_all();
     Ok(info)
@@ -636,20 +694,39 @@ pub async fn enroll_person_voice(
     meeting_id: Option<String>,
 ) -> Result<VoiceProfileInfo, String> {
     let pool = state.db_manager.pool();
-    let name: String = sqlx::query_scalar("SELECT display_name FROM people WHERE id = ?")
-        .bind(&person_id).fetch_optional(pool).await.map_err(|error| error.to_string())?
-        .ok_or("Contact not found")?;
-    let meetings: Vec<(String, String)> = sqlx::query_as(
-        "SELECT ps.meeting_id, ps.speaker_label FROM person_speakers ps \
-         JOIN meetings m ON m.id = ps.meeting_id \
-         WHERE ps.person_id = ? AND (? IS NULL OR ps.meeting_id = ?) \
-         AND NOT EXISTS (SELECT 1 FROM voice_speaker_matches v WHERE v.meeting_id = ps.meeting_id \
-             AND v.person_id = ps.person_id AND v.status = 'applied') \
-         ORDER BY m.created_at DESC LIMIT ?",
-    ).bind(&person_id).bind(&meeting_id).bind(&meeting_id).bind(MAX_SOURCES as i64)
-        .fetch_all(pool).await.map_err(|error| error.to_string())?;
+    let own = person_id == SELF_ID;
+    let name: String = if own {
+        SELF_LABEL.to_string()
+    } else {
+        sqlx::query_scalar("SELECT display_name FROM people WHERE id = ?")
+            .bind(&person_id).fetch_optional(pool).await.map_err(|error| error.to_string())?
+            .ok_or("Contact not found")?
+    };
+    let meetings: Vec<(String, String)> = if own {
+        sqlx::query_as(
+            "SELECT t.meeting_id, MIN(t.speaker) FROM transcripts t JOIN meetings m ON m.id = t.meeting_id \
+             WHERE lower(trim(t.speaker)) = 'you' AND (? IS NULL OR t.meeting_id = ?) \
+             AND NOT EXISTS (SELECT 1 FROM self_voice_matches v WHERE v.meeting_id = t.meeting_id AND v.status = 'applied') \
+             GROUP BY t.meeting_id ORDER BY MAX(m.created_at) DESC LIMIT ?",
+        ).bind(&meeting_id).bind(&meeting_id).bind(MAX_SOURCES as i64)
+            .fetch_all(pool).await.map_err(|error| error.to_string())?
+    } else {
+        sqlx::query_as(
+            "SELECT ps.meeting_id, ps.speaker_label FROM person_speakers ps \
+             JOIN meetings m ON m.id = ps.meeting_id \
+             WHERE ps.person_id = ? AND (? IS NULL OR ps.meeting_id = ?) \
+             AND NOT EXISTS (SELECT 1 FROM voice_speaker_matches v WHERE v.meeting_id = ps.meeting_id \
+                 AND v.person_id = ps.person_id AND v.status = 'applied') \
+             ORDER BY m.created_at DESC LIMIT ?",
+        ).bind(&person_id).bind(&meeting_id).bind(&meeting_id).bind(MAX_SOURCES as i64)
+            .fetch_all(pool).await.map_err(|error| error.to_string())?
+    };
     if meetings.is_empty() {
-        return Err(format!("{name} is not named as a speaker in a saved meeting yet."));
+        return Err(if own {
+            "No saved meeting has lines labeled You yet.".into()
+        } else {
+            format!("{name} is not named as a speaker in a saved meeting yet.")
+        });
     }
     let tried = meetings.len();
     let mut shares = Vec::new();
@@ -666,9 +743,11 @@ pub async fn enroll_person_voice(
         if tried == 1 {
             return Err(last_problem);
         }
-        return Err(format!(
-            "None of {name}'s last {tried} meetings has clear call audio of them. Learning a voice needs meetings recorded with Save audio on, where they speak for turns of 2 to 15 seconds."
-        ));
+        return Err(if own {
+            format!("None of your last {tried} meetings has clear microphone audio of you. Learning your voice needs meetings recorded with Save audio on, where you speak for turns of 2 to 15 seconds.")
+        } else {
+            format!("None of {name}'s last {tried} meetings has clear call audio of them. Learning a voice needs meetings recorded with Save audio on, where they speak for turns of 2 to 15 seconds.")
+        });
     }
     let info = store_shares(&person_id, &name, shares, meeting_id.is_none())?;
     super::voice_learning::check_all();
@@ -686,24 +765,38 @@ pub struct VoiceCandidates {
     pub models_ready: bool,
 }
 
+/// For you, the meetings with lines labeled You and their microphone audio.
 pub(crate) async fn voice_candidates(pool: &SqlitePool, person_id: &str) -> Result<VoiceCandidates, sqlx::Error> {
-    let rows: Vec<(String, Option<String>, bool)> = sqlx::query_as(
-        "SELECT ps.speaker_label, m.folder_path, EXISTS (SELECT 1 FROM voice_speaker_matches v \
-             WHERE v.meeting_id = ps.meeting_id AND v.person_id = ps.person_id AND v.status = 'applied') \
-         FROM person_speakers ps JOIN meetings m ON m.id = ps.meeting_id WHERE ps.person_id = ?",
-    )
-    .bind(person_id)
-    .fetch_all(pool)
-    .await?;
+    let own = person_id == SELF_ID;
+    let rows: Vec<(String, Option<String>, bool)> = if own {
+        sqlx::query_as(
+            "SELECT 'You', m.folder_path, EXISTS (SELECT 1 FROM self_voice_matches v \
+                 WHERE v.meeting_id = m.id AND v.status = 'applied') \
+             FROM meetings m WHERE EXISTS (SELECT 1 FROM transcripts t \
+                 WHERE t.meeting_id = m.id AND lower(trim(t.speaker)) = 'you')",
+        )
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_as(
+            "SELECT ps.speaker_label, m.folder_path, EXISTS (SELECT 1 FROM voice_speaker_matches v \
+                 WHERE v.meeting_id = ps.meeting_id AND v.person_id = ps.person_id AND v.status = 'applied') \
+             FROM person_speakers ps JOIN meetings m ON m.id = ps.meeting_id WHERE ps.person_id = ?",
+        )
+        .bind(person_id)
+        .fetch_all(pool)
+        .await?
+    };
     let paths: Vec<(bool, Option<String>)> = rows
         .into_iter()
-        .filter(|(label, _, _)| crate::database::repositories::person::is_person_name(label))
+        .filter(|(label, _, _)| own || crate::database::repositories::person::is_person_name(label))
         .map(|(_, folder, automatic)| (automatic, folder))
         .collect();
     // File checks can hit a cloud-synced folder; keep them off the async runtime.
     let with_audio = tokio::task::spawn_blocking({
         let manual: Vec<String> = paths.iter().filter(|(automatic, _)| !automatic).filter_map(|(_, folder)| folder.clone()).collect();
-        move || manual.iter().filter(|folder| call_track(Path::new(folder)).is_file()).count() as u32
+        let speaker = if own { SELF_LABEL } else { "" };
+        move || manual.iter().filter(|folder| learn_track(Path::new(folder), speaker).is_file()).count() as u32
     })
     .await
     .unwrap_or(0);
@@ -922,7 +1015,7 @@ fn forget(profiles: &mut Vec<VoiceProfile>, person_id: &str) -> bool {
 /// `people` maps each contact id to its current name.
 fn reconcile_with_contacts(profiles: &mut Vec<VoiceProfile>, people: &HashMap<String, String>) -> bool {
     let before = profiles.len();
-    profiles.retain(|profile| people.contains_key(&profile.person_id));
+    profiles.retain(|profile| profile.person_id == SELF_ID || people.contains_key(&profile.person_id));
     let mut changed = profiles.len() != before;
     for profile in profiles.iter_mut() {
         if let Some(name) = people.get(&profile.person_id) {
@@ -985,6 +1078,31 @@ mod candidate_tests {
         let found = voice_candidates(&pool, "p1").await.unwrap();
         assert_eq!((found.named, found.with_audio, found.automatic), (3, 1, 1));
         assert_eq!(voice_candidates(&pool, "nobody").await.unwrap(), VoiceCandidates { models_ready: found.models_ready, ..Default::default() });
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn your_candidates_are_meetings_with_you_lines_and_microphone_audio() {
+        let root = std::env::temp_dir().join(format!("meetily-self-candidates-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        // Call audio alone does not count: your voice is on the microphone.
+        for (folder, track) in [("mic", "mic.mp4"), ("call", "system.mp4"), ("auto", "mic.mp4")] {
+            std::fs::create_dir_all(root.join(folder)).unwrap();
+            std::fs::write(root.join(folder).join(track), b"audio").unwrap();
+        }
+        let pool = migrated_pool().await;
+        let folder = |name: &str| root.join(name).to_string_lossy().to_string();
+        for (id, path) in [("m1", folder("mic")), ("m2", folder("call")), ("m3", folder("auto")), ("m4", folder("mic"))] {
+            sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at, folder_path) VALUES (?, 'T', 'c', 'u', ?)")
+                .bind(id).bind(path).execute(&pool).await.unwrap();
+        }
+        sqlx::raw_sql(
+            "INSERT INTO transcripts (id, meeting_id, transcript, timestamp, speaker) VALUES \
+                ('t1', 'm1', 'a', 'c', 'You'), ('t2', 'm2', 'b', 'c', 'You'), ('t3', 'm3', 'c', 'c', 'You'), ('t4', 'm4', 'd', 'c', 'Speaker 1'); \
+             INSERT INTO self_voice_matches (meeting_id, original_label, status, created_at) VALUES ('m3', 'Speaker 2', 'applied', 'c');",
+        ).execute(&pool).await.unwrap();
+        let found = voice_candidates(&pool, SELF_ID).await.unwrap();
+        assert_eq!((found.named, found.with_audio, found.automatic), (2, 1, 1));
         let _ = std::fs::remove_dir_all(root);
     }
 }
@@ -1050,11 +1168,13 @@ mod tests {
         assert!(!forget(&mut profiles, "p2"));
         assert_eq!(profiles.len(), 1);
 
-        let mut profiles = vec![voice("p1", "Alice"), voice("gone", "Carol")];
+        // Your own voice has no contact row and is kept.
+        let mut profiles = vec![voice("p1", "Alice"), voice("gone", "Carol"), voice(SELF_ID, SELF_LABEL)];
         let people = HashMap::from([("p1".to_string(), "Alice Smith".to_string())]);
         assert!(reconcile_with_contacts(&mut profiles, &people));
-        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles.len(), 2);
         assert_eq!(profiles[0].name, "Alice Smith");
+        assert_eq!(profiles[1].name, SELF_LABEL);
         assert!(!reconcile_with_contacts(&mut profiles, &people));
     }
 

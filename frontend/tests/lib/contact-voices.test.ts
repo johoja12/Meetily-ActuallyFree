@@ -25,6 +25,12 @@ test('the reason a voice cannot be learned yet, most actionable first', () => {
   expect(voiceLearnBlocker({ ...ready, with_audio: 0 }, 'Jane')).toContain('call audio');
 });
 
+test('your own voice is learned from your microphone lines, not from naming', () => {
+  expect(voiceLearnBlocker(ready, 'you', true)).toBeNull();
+  expect(voiceLearnBlocker({ ...ready, named: 0, with_audio: 0 }, 'you', true)).toContain('labeled You');
+  expect(voiceLearnBlocker({ ...ready, with_audio: 0 }, 'you', true)).toContain('microphone audio');
+});
+
 test('contacts filter by whether a voice is saved', () => {
   const people = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
   const voices = [{ person_id: 'b', name: 'B', samples: 3, meetings: 1 }];

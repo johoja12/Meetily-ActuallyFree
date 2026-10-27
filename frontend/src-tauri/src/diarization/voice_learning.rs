@@ -10,7 +10,10 @@
 //! compared with the saved voices using the meeting's own transcript spans (no
 //! re-diarization), and a confident match renames the label like a manual edit.
 //! Names set this way are recorded in `voice_speaker_matches` and never train a
-//! voice; undoing one records a rejection so it is not applied again.
+//! voice; undoing one records a rejection so it is not applied again. Your own
+//! voice names a speaker "You" only in room-microphone meetings, the one case
+//! where your voice is on the track being matched; those matches are kept in
+//! `self_voice_matches`.
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -20,7 +23,7 @@ use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Notify;
 
-use super::voice_profiles::{self, VoiceProfile};
+use super::voice_profiles::{self, is_self_label, VoiceProfile, SELF_ID, SELF_LABEL};
 use crate::database::repositories::person::{is_person_name, PeopleRepository};
 
 pub const STATUS_EVENT: &str = "voice-learning-status";
@@ -166,7 +169,7 @@ async fn process(pool: &SqlitePool, batch: Pending) {
     if meetings.is_empty() || !super::pyannote_models_available() {
         return;
     }
-    let profiles = match voice_profiles::load_for_matching() {
+    let profiles = match voice_profiles::load_all_for_matching() {
         Ok(profiles) if !profiles.is_empty() => profiles,
         Ok(_) => return,
         Err(error) => {
@@ -254,6 +257,12 @@ async fn match_meeting(pool: &SqlitePool, meeting_id: &str, profiles: &[VoicePro
     if !track.is_file() {
         return Ok(Vec::new());
     }
+    // Outside room mode the matched track is the call, where you are not.
+    let room = crate::audio::recording_saver::is_room_microphone_recording(Path::new(&folder));
+    let profiles: Vec<VoiceProfile> = profiles.iter().filter(|profile| room || profile.person_id != SELF_ID).cloned().collect();
+    if profiles.is_empty() {
+        return Ok(Vec::new());
+    }
     let rows = voice_profiles::transcript_turns(pool, meeting_id).await.map_err(failed)?;
     let turns: HashMap<String, Vec<(f64, f64)>> = generic_labels(&rows)
         .into_iter()
@@ -273,7 +282,7 @@ async fn match_meeting(pool: &SqlitePool, meeting_id: &str, profiles: &[VoicePro
     let scored: Vec<Scored> = means
         .iter()
         .filter_map(|(label, mean)| {
-            voice_profiles::best_match_scored(mean, profiles).map(|(profile, score)| Scored {
+            voice_profiles::best_match_scored(mean, &profiles).map(|(profile, score)| Scored {
                 label: label.clone(),
                 person_id: profile.person_id.clone(),
                 score,
@@ -295,23 +304,45 @@ async fn match_meeting(pool: &SqlitePool, meeting_id: &str, profiles: &[VoicePro
 async fn apply(pool: &SqlitePool, meeting_id: &str, title: &str, scored: Vec<Scored>) -> Result<Vec<VoiceMatch>, String> {
     let failed = |error: sqlx::Error| error.to_string();
     let rows = voice_profiles::transcript_turns(pool, meeting_id).await.map_err(failed)?;
-    let named: HashSet<String> = sqlx::query_scalar("SELECT person_id FROM person_speakers WHERE meeting_id = ?")
+    let mut named: HashSet<String> = sqlx::query_scalar("SELECT person_id FROM person_speakers WHERE meeting_id = ?")
         .bind(meeting_id).fetch_all(pool).await.map_err(failed)?.into_iter().collect();
-    let rejected: HashSet<(String, String)> = sqlx::query_as(
+    if rows.iter().any(|(label, _, _)| label.split(" + ").any(is_self_label)) {
+        named.insert(SELF_ID.to_string());
+    }
+    let mut rejected: HashSet<(String, String)> = sqlx::query_as(
         "SELECT original_label, person_id FROM voice_speaker_matches WHERE meeting_id = ? AND status = 'rejected'",
     ).bind(meeting_id).fetch_all(pool).await.map_err(failed)?.into_iter().collect();
+    let self_rejected: Vec<String> = sqlx::query_scalar(
+        "SELECT original_label FROM self_voice_matches WHERE meeting_id = ? AND status = 'rejected'",
+    ).bind(meeting_id).fetch_all(pool).await.map_err(failed)?;
+    rejected.extend(self_rejected.into_iter().map(|label| (label, SELF_ID.to_string())));
     let mut applied = Vec::new();
     for chosen in choose(scored, &generic_labels(&rows), &named, &rejected) {
+        let own = chosen.person_id == SELF_ID;
         // The contact's current name, so the label links to that contact.
-        let Some(name): Option<String> = sqlx::query_scalar("SELECT display_name FROM people WHERE id = ?")
-            .bind(&chosen.person_id).fetch_optional(pool).await.map_err(failed)?
-        else { continue };
+        let name: String = if own {
+            SELF_LABEL.to_string()
+        } else {
+            let Some(name) = sqlx::query_scalar("SELECT display_name FROM people WHERE id = ?")
+                .bind(&chosen.person_id).fetch_optional(pool).await.map_err(failed)?
+            else { continue };
+            name
+        };
         PeopleRepository::rename_meeting_speaker(pool, meeting_id, &chosen.label, &name).await.map_err(failed)?;
-        sqlx::query(
-            "INSERT INTO voice_speaker_matches (meeting_id, original_label, person_id, status, created_at) \
-             VALUES (?, ?, ?, 'applied', datetime('now')) \
-             ON CONFLICT(meeting_id, original_label, person_id) DO UPDATE SET status = 'applied'",
-        ).bind(meeting_id).bind(&chosen.label).bind(&chosen.person_id).execute(pool).await.map_err(failed)?;
+        let record = if own {
+            sqlx::query(
+                "INSERT INTO self_voice_matches (meeting_id, original_label, status, created_at) \
+                 VALUES (?, ?, 'applied', datetime('now')) \
+                 ON CONFLICT(meeting_id, original_label) DO UPDATE SET status = 'applied'",
+            ).bind(meeting_id).bind(&chosen.label)
+        } else {
+            sqlx::query(
+                "INSERT INTO voice_speaker_matches (meeting_id, original_label, person_id, status, created_at) \
+                 VALUES (?, ?, ?, 'applied', datetime('now')) \
+                 ON CONFLICT(meeting_id, original_label, person_id) DO UPDATE SET status = 'applied'",
+            ).bind(meeting_id).bind(&chosen.label).bind(&chosen.person_id)
+        };
+        record.execute(pool).await.map_err(failed)?;
         log::info!("Saved voice named {} in meeting {meeting_id} (cosine {:.2})", chosen.label, chosen.score);
         applied.push(VoiceMatch {
             meeting_id: meeting_id.to_string(),
@@ -333,9 +364,12 @@ pub(crate) struct SpeakerEdit {
 }
 
 pub(crate) async fn before_speaker_edit(pool: &SqlitePool, meeting_id: &str, label: &str) -> SpeakerEdit {
-    let person_id: Option<String> = sqlx::query_scalar(
-        "SELECT person_id FROM person_speakers WHERE meeting_id = ? AND speaker_label = ?",
-    ).bind(meeting_id).bind(label.trim()).fetch_optional(pool).await.ok().flatten();
+    let person_id: Option<String> = if is_self_label(label) {
+        Some(SELF_ID.to_string())
+    } else {
+        sqlx::query_scalar("SELECT person_id FROM person_speakers WHERE meeting_id = ? AND speaker_label = ?")
+            .bind(meeting_id).bind(label.trim()).fetch_optional(pool).await.ok().flatten()
+    };
     let automatic = match &person_id {
         Some(person) => voice_profiles::is_automatic(pool, meeting_id, person).await,
         None => false,
@@ -348,21 +382,35 @@ pub(crate) async fn before_speaker_edit(pool: &SqlitePool, meeting_id: &str, lab
 /// voice match had named them, the match is recorded as rejected.
 pub(crate) async fn after_speaker_edit(pool: &SqlitePool, edit: SpeakerEdit, new_label: &str) {
     if let Some(person) = &edit.person_id {
-        let still_named: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM person_speakers WHERE meeting_id = ? AND person_id = ?",
-        ).bind(&edit.meeting_id).bind(person).fetch_one(pool).await.unwrap_or(1);
+        let own = person == SELF_ID;
+        let still_named: i64 = if own {
+            sqlx::query_scalar(&format!(
+                "SELECT COUNT(*) FROM transcripts WHERE meeting_id = ? AND {}",
+                voice_profiles::self_label_sql("speaker"),
+            )).bind(&edit.meeting_id).fetch_one(pool).await.unwrap_or(1)
+        } else {
+            sqlx::query_scalar("SELECT COUNT(*) FROM person_speakers WHERE meeting_id = ? AND person_id = ?")
+                .bind(&edit.meeting_id).bind(person).fetch_one(pool).await.unwrap_or(1)
+        };
         if still_named == 0 {
             if edit.automatic {
-                let _ = sqlx::query(
-                    "UPDATE voice_speaker_matches SET status = 'rejected' \
-                     WHERE meeting_id = ? AND person_id = ? AND status = 'applied'",
-                ).bind(&edit.meeting_id).bind(person).execute(pool).await;
+                let reject = if own {
+                    sqlx::query("UPDATE self_voice_matches SET status = 'rejected' WHERE meeting_id = ? AND status = 'applied'")
+                        .bind(&edit.meeting_id)
+                } else {
+                    sqlx::query(
+                        "UPDATE voice_speaker_matches SET status = 'rejected' \
+                         WHERE meeting_id = ? AND person_id = ? AND status = 'applied'",
+                    ).bind(&edit.meeting_id).bind(person)
+                };
+                let _ = reject.execute(pool).await;
             } else {
                 forget(person, &edit.meeting_id);
             }
         }
     }
-    if is_person_name(new_label) {
+    // "This is me" teaches your voice like naming a contact teaches theirs.
+    if is_person_name(new_label) || is_self_label(new_label) {
         learn(&edit.meeting_id, new_label);
     }
 }
@@ -400,17 +448,32 @@ pub async fn undo_voice_matches(
 async fn undo(pool: &SqlitePool, matches: Vec<VoiceMatchRef>) -> Result<Vec<String>, String> {
     let mut changed = Vec::new();
     for reference in matches {
-        let status: Option<String> = sqlx::query_scalar(
-            "SELECT status FROM voice_speaker_matches WHERE meeting_id = ? AND original_label = ? AND person_id = ?",
-        ).bind(&reference.meeting_id).bind(&reference.original_label).bind(&reference.person_id)
-            .fetch_optional(pool).await.map_err(|error| error.to_string())?;
+        let own = reference.person_id == SELF_ID;
+        let status: Option<String> = if own {
+            sqlx::query_scalar("SELECT status FROM self_voice_matches WHERE meeting_id = ? AND original_label = ?")
+                .bind(&reference.meeting_id).bind(&reference.original_label)
+                .fetch_optional(pool).await.map_err(|error| error.to_string())?
+        } else {
+            sqlx::query_scalar(
+                "SELECT status FROM voice_speaker_matches WHERE meeting_id = ? AND original_label = ? AND person_id = ?",
+            ).bind(&reference.meeting_id).bind(&reference.original_label).bind(&reference.person_id)
+                .fetch_optional(pool).await.map_err(|error| error.to_string())?
+        };
         if status.as_deref() != Some("applied") {
             continue;
         }
-        let label: Option<String> = sqlx::query_scalar(
-            "SELECT speaker_label FROM person_speakers WHERE meeting_id = ? AND person_id = ? LIMIT 1",
-        ).bind(&reference.meeting_id).bind(&reference.person_id)
-            .fetch_optional(pool).await.map_err(|error| error.to_string())?;
+        let label: Option<String> = if own {
+            // Renaming "You" also renames it inside combined labels.
+            let present: i64 = sqlx::query_scalar(&format!(
+                "SELECT COUNT(*) FROM transcripts WHERE meeting_id = ? AND {}",
+                voice_profiles::self_label_sql("speaker"),
+            )).bind(&reference.meeting_id).fetch_one(pool).await.map_err(|error| error.to_string())?;
+            (present > 0).then(|| SELF_LABEL.to_string())
+        } else {
+            sqlx::query_scalar("SELECT speaker_label FROM person_speakers WHERE meeting_id = ? AND person_id = ? LIMIT 1")
+                .bind(&reference.meeting_id).bind(&reference.person_id)
+                .fetch_optional(pool).await.map_err(|error| error.to_string())?
+        };
         if let Some(label) = label {
             let rows = voice_profiles::transcript_turns(pool, &reference.meeting_id).await.map_err(|error| error.to_string())?;
             // An empty destination takes the next free "Speaker N".
@@ -418,10 +481,15 @@ async fn undo(pool: &SqlitePool, matches: Vec<VoiceMatchRef>) -> Result<Vec<Stri
             PeopleRepository::rename_meeting_speaker(pool, &reference.meeting_id, &label, restore)
                 .await.map_err(|error| format!("Could not undo the name: {error}"))?;
         }
-        sqlx::query(
-            "UPDATE voice_speaker_matches SET status = 'rejected' WHERE meeting_id = ? AND original_label = ? AND person_id = ?",
-        ).bind(&reference.meeting_id).bind(&reference.original_label).bind(&reference.person_id)
-            .execute(pool).await.map_err(|error| error.to_string())?;
+        let reject = if own {
+            sqlx::query("UPDATE self_voice_matches SET status = 'rejected' WHERE meeting_id = ? AND original_label = ?")
+                .bind(&reference.meeting_id).bind(&reference.original_label)
+        } else {
+            sqlx::query(
+                "UPDATE voice_speaker_matches SET status = 'rejected' WHERE meeting_id = ? AND original_label = ? AND person_id = ?",
+            ).bind(&reference.meeting_id).bind(&reference.original_label).bind(&reference.person_id)
+        };
+        reject.execute(pool).await.map_err(|error| error.to_string())?;
         if !changed.contains(&reference.meeting_id) {
             changed.push(reference.meeting_id);
         }
@@ -438,7 +506,7 @@ pub fn apply_voices_to_past_meetings() -> Result<(), String> {
     if !super::pyannote_models_available() {
         return Err("Voice profiles need the speaker models. Download them in Settings > Transcription.".into());
     }
-    if voice_profiles::load_for_matching().map_err(|error| error.to_string())?.is_empty() {
+    if voice_profiles::load_all_for_matching().map_err(|error| error.to_string())?.is_empty() {
         return Err("No voices yet. Name a speaker in a meeting to learn their voice.".into());
     }
     check_all();
@@ -516,7 +584,54 @@ mod tests {
         ).execute(&pool).await.unwrap();
         sqlx::raw_sql(include_str!("../../migrations/20261027000000_add_voice_speaker_matches.sql"))
             .execute(&pool).await.unwrap();
+        sqlx::raw_sql(include_str!("../../migrations/20261028010000_add_self_voice_matches.sql"))
+            .execute(&pool).await.unwrap();
         pool
+    }
+
+    async fn self_status(pool: &SqlitePool) -> Option<String> {
+        sqlx::query_scalar("SELECT status FROM self_voice_matches WHERE meeting_id = 'm1' AND original_label = 'Speaker 3'")
+            .fetch_optional(pool).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn your_voice_names_you_and_undo_restores_and_remembers_it() {
+        let pool = meeting_pool().await;
+        let applied = apply(&pool, "m1", "Standup", vec![scored("Speaker 3", SELF_ID, 0.9)]).await.unwrap();
+        assert_eq!((applied[0].name.as_str(), applied[0].person_id.as_str()), ("You", SELF_ID));
+        assert_eq!(labels(&pool).await, vec!["You", "You + Speaker 4", "Speaker 4"]);
+        assert_eq!(self_status(&pool).await.as_deref(), Some("applied"));
+        assert!(voice_profiles::is_automatic(&pool, "m1", SELF_ID).await);
+        // No contact link is made for you.
+        let links: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM person_speakers").fetch_one(&pool).await.unwrap();
+        assert_eq!(links, 0);
+
+        // You are already in the meeting: a second pass changes nothing.
+        assert!(apply(&pool, "m1", "Standup", vec![scored("Speaker 4", SELF_ID, 0.95)]).await.unwrap().is_empty());
+
+        let reference = VoiceMatchRef { meeting_id: "m1".into(), person_id: SELF_ID.into(), original_label: "Speaker 3".into() };
+        assert_eq!(undo(&pool, vec![reference]).await.unwrap(), vec!["m1".to_string()]);
+        assert_eq!(labels(&pool).await, vec!["Speaker 3", "Speaker 3 + Speaker 4", "Speaker 4"]);
+        assert_eq!(self_status(&pool).await.as_deref(), Some("rejected"));
+        assert!(apply(&pool, "m1", "Standup", vec![scored("Speaker 3", SELF_ID, 0.97)]).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn renaming_you_away_after_a_match_rejects_it_and_this_is_me_learns() {
+        let pool = meeting_pool().await;
+        apply(&pool, "m1", "Standup", vec![scored("Speaker 3", SELF_ID, 0.9)]).await.unwrap();
+        let edit = before_speaker_edit(&pool, "m1", "You").await;
+        assert!(edit.automatic);
+        PeopleRepository::rename_meeting_speaker(&pool, "m1", "You", "").await.unwrap();
+        after_speaker_edit(&pool, edit, "Speaker 1").await;
+        assert_eq!(self_status(&pool).await.as_deref(), Some("rejected"));
+        assert!(take().forget.is_empty());
+
+        // Marking a speaker as you is a manual name, so it teaches your voice.
+        let edit = before_speaker_edit(&pool, "m1", "Speaker 4").await;
+        PeopleRepository::rename_meeting_speaker(&pool, "m1", "Speaker 4", "You").await.unwrap();
+        after_speaker_edit(&pool, edit, "You").await;
+        assert!(take().learn.contains(&("m1".to_string(), "You".to_string())));
     }
 
     async fn labels(pool: &SqlitePool) -> Vec<String> {

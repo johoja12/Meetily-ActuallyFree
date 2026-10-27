@@ -17,7 +17,8 @@ import { usePlatform } from '@/hooks/usePlatform';
 import { useLabs } from '@/hooks/useLabs';
 import { useVoiceProfiles } from '@/hooks/useVoiceProfiles';
 import { setLabsFeature, syncLabsFromBackend, type LabsFeature } from '@/lib/labs-features';
-import { describeVoiceError, describeVoiceSource, forgetVoice } from '@/lib/voice-profiles';
+import { describeVoiceError, describeVoiceSource, forgetVoice, SELF_VOICE_ID } from '@/lib/voice-profiles';
+import { ContactVoicePanel } from '@/components/people/ContactVoicePanel';
 import { applyVoicesToPastMeetings, getVoiceLearningRunning, VOICE_LEARNING_STATUS_EVENT } from '@/lib/voice-matches';
 import { listen } from '@tauri-apps/api/event';
 
@@ -138,9 +139,11 @@ function FeatureRow({
   );
 }
 
-/** The learned voices, each linked to its contact. */
+/** Your voice, then the learned contact voices, each linked to its contact. */
 function LearnedVoices() {
-  const profiles = useVoiceProfiles();
+  const allProfiles = useVoiceProfiles();
+  // Yours has no contact page; it is managed in its own panel above the list.
+  const profiles = allProfiles?.filter((profile) => profile.person_id !== SELF_VOICE_ID) ?? null;
   const [modelsReady, setModelsReady] = useState<boolean | null>(null);
   const [learning, setLearning] = useState(false);
 
@@ -180,11 +183,12 @@ function LearnedVoices() {
           .
         </p>
       )}
+      <ContactVoicePanel personId={SELF_VOICE_ID} first="" />
       {profiles === null ? (
         <div className="af-skeleton h-10 rounded-lg" />
       ) : profiles.length === 0 ? (
         <p className="text-xs leading-relaxed text-af-text-3">
-          No voices yet. Name a speaker in a meeting and their voice is learned, or open a contact from{' '}
+          No contact voices yet. Name a speaker in a meeting and their voice is learned, or open a contact from{' '}
           <Link href="/contacts" className="font-medium text-af-accent hover:underline">
             Contacts
           </Link>{' '}
@@ -224,7 +228,7 @@ function LearnedVoices() {
         <button
           type="button"
           onClick={applyToPast}
-          disabled={learning || !profiles?.length}
+          disabled={learning || !allProfiles?.length}
           className="rounded-lg border border-af-border px-3 py-1.5 text-xs font-medium text-af-text-2 transition-colors hover:bg-af-hover hover:text-af-text disabled:cursor-not-allowed disabled:opacity-50"
         >
           Apply voices to past meetings

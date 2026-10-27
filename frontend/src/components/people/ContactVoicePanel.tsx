@@ -1,9 +1,10 @@
 'use client';
 
 /**
- * A contact's voice: whether Meetily knows it, and learning it from their
- * meetings. Shown whether or not Labs voice profiles are on; learning turns
- * them on, since a learned voice is only used while they are.
+ * A contact's voice, or yours with `SELF_VOICE_ID`: whether Meetily knows it,
+ * and learning it from their meetings. Shown whether or not Labs voice
+ * profiles are on; learning turns them on, since a learned voice is only used
+ * while they are.
  */
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
@@ -17,6 +18,7 @@ import {
   forgetVoice,
   getVoiceCandidates,
   learnVoiceForContact,
+  SELF_VOICE_ID,
   voiceLearnBlocker,
   type VoiceCandidates,
 } from '@/lib/voice-profiles';
@@ -30,8 +32,9 @@ export function ContactVoicePanel({ personId, first }: { personId: string; first
   const voice = voices?.find((profile) => profile.person_id === personId);
   const [candidates, setCandidates] = useState<VoiceCandidates | null>(null);
   const [busy, setBusy] = useState<'learn' | 'forget' | 'enable' | null>(null);
-  const who = first || 'them';
-  const whose = who === 'them' ? 'their' : `${who}'s`;
+  const own = personId === SELF_VOICE_ID;
+  const who = own ? 'you' : first || 'them';
+  const whose = own ? 'your' : who === 'them' ? 'their' : `${who}'s`;
 
   // What a voice could be learned from; reread when voices or contacts change.
   useEffect(() => {
@@ -42,7 +45,7 @@ export function ContactVoicePanel({ personId, first }: { personId: string; first
     return () => { current = false; };
   }, [personId, voices]);
 
-  const blocker = candidates ? voiceLearnBlocker(candidates, who) : null;
+  const blocker = candidates ? voiceLearnBlocker(candidates, who, own) : null;
 
   // Reads all their recent meetings, so an update picks up new ones.
   const learn = async () => {
@@ -50,7 +53,7 @@ export function ContactVoicePanel({ personId, first }: { personId: string; first
     setBusy('learn');
     try {
       const { profile, turnedOn } = await learnVoiceForContact(personId, labs.voiceProfiles);
-      toast.success(`${updating ? 'Updated' : 'Learned'} ${first || profile.name}'s voice`, {
+      toast.success(`${updating ? 'Updated' : 'Learned'} ${own ? 'your' : `${first || profile.name}'s`} voice`, {
         description: `From ${describeVoiceSource(profile)}.${turnedOn ? ' Voice profiles are now on in Settings > Labs.' : ''}`,
       });
     } catch (error) {
@@ -88,7 +91,7 @@ export function ContactVoicePanel({ personId, first }: { personId: string; first
     : null;
 
   return (
-    <Panel title="Voice" action={<Badge variant="accent" size="xs">Labs</Badge>}>
+    <Panel title={own ? 'Your voice' : 'Voice'} action={<Badge variant="accent" size="xs">Labs</Badge>}>
       {voices === null ? (
         <Skeleton className="h-16" />
       ) : voice ? (
@@ -99,7 +102,9 @@ export function ContactVoicePanel({ personId, first }: { personId: string; first
           </p>
           <p className="mt-1 text-xs leading-relaxed text-af-text-3">
             {labs.voiceProfiles
-              ? `Learned from ${describeVoiceSource(voice)}. When speakers are identified in a new meeting, a matching voice is named ${first || voice.name}. Update relearns it from all their recent meetings.`
+              ? own
+                ? `Learned from ${describeVoiceSource(voice)}. In room-microphone meetings, a speaker with your voice is named You. Update relearns it from your recent meetings.`
+                : `Learned from ${describeVoiceSource(voice)}. When speakers are identified in a new meeting, a matching voice is named ${first || voice.name}. Update relearns it from all their recent meetings.`
               : 'Voice profiles are off in Settings > Labs, so this voice is not used right now.'}
           </p>
           <div className="mt-3 flex flex-wrap gap-2">
@@ -121,7 +126,10 @@ export function ContactVoicePanel({ personId, first }: { personId: string; first
         <>
           <p className="text-[13px] font-medium text-af-text-2">No voice saved</p>
           <p className="mt-1 text-xs leading-relaxed text-af-text-3">
-            {blocker ?? `Learn ${whose} voice from meetings where you named them, so later meetings name a matching speaker for you. ${usable ?? ''}`}
+            {blocker ??
+              (own
+                ? `Learn your voice from your microphone lines, so room-microphone meetings name you automatically. ${usable ?? ''}`
+                : `Learn ${whose} voice from meetings where you named them, so later meetings name a matching speaker for you. ${usable ?? ''}`)}
           </p>
           {!labs.voiceProfiles && !blocker && (
             <p className="mt-1 text-[11px] text-af-text-4">This turns on Voice profiles in Settings &gt; Labs.</p>

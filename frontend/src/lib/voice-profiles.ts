@@ -7,6 +7,13 @@
 import { invoke } from '@tauri-apps/api/core';
 import { setLabsFeature } from '@/lib/labs-features';
 
+/**
+ * Your own voice's id. You have no contact, so Rust keeps your voice under
+ * this id, learns it from your "You" lines on the microphone track, and uses
+ * it to name you in room-microphone meetings.
+ */
+export const SELF_VOICE_ID = 'self';
+
 export interface VoiceProfile {
   person_id: string;
   name: string;
@@ -75,9 +82,16 @@ export function getVoiceCandidates(personId: string): Promise<VoiceCandidates> {
   return invoke<VoiceCandidates>('voice_learning_candidates', { personId });
 }
 
-/** Why a voice cannot be learned yet, or null when it can. */
-export function voiceLearnBlocker(candidates: VoiceCandidates, who: string): string | null {
+/** Why a voice cannot be learned yet, or null when it can. `own` is your voice. */
+export function voiceLearnBlocker(candidates: VoiceCandidates, who: string, own = false): string | null {
   if (!candidates.models_ready) return 'Learning a voice needs the speaker models. Download them in Settings > Transcription.';
+  if (own) {
+    if (candidates.named === 0) return 'Record a meeting first. Your voice is learned from your microphone lines, labeled You.';
+    if (candidates.with_audio === 0) {
+      return 'None of your meetings still has its microphone audio. Learning needs a meeting recorded with Save audio on.';
+    }
+    return null;
+  }
   if (candidates.named === 0) {
     return candidates.automatic > 0
       ? `${who} was only named automatically from their voice. Confirm or name them yourself in a meeting to learn from it.`

@@ -59,3 +59,15 @@ test('a saved voice shows as saved', async () => {
   expect(text()).toContain('Voice saved');
   expect(text()).toContain('9 clear turns in 2 meetings');
 });
+
+test('your own voice can be learned, with wording about you', async () => {
+  candidates = { named: 3, with_audio: 2, automatic: 0, models_ready: true };
+  voices = [];
+  labsOn = true;
+  await act(async () => { root = create(<ContactVoicePanel personId="self" first="" />); });
+  expect(text()).toContain('Learn your voice from your microphone lines');
+  expect(learnButton().props.disabled).toBe(false);
+  await act(async () => learnButton().props.onClick());
+  expect(calls.find(([command]) => command === 'enroll_person_voice')?.[1]).toEqual({ personId: 'self', meetingId: null });
+  expect(toasts[0]).toContain('Learned your voice');
+});

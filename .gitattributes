@@ -13,3 +13,4 @@ frontend/src-tauri/migrations/20260928010000_reset_placeholder_titles.sql text e
 frontend/src-tauri/migrations/20261027000000_add_voice_speaker_matches.sql text eol=lf
 frontend/src-tauri/migrations/20261027010000_add_sync.sql text eol=lf
 frontend/src-tauri/migrations/20261027020000_add_meeting_calendar_events.sql text eol=lf
+frontend/src-tauri/migrations/20261028010000_add_self_voice_matches.sql text eol=lf

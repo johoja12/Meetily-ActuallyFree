@@ -593,7 +593,11 @@ pub fn hold_unknown_voices(
     known: &std::collections::HashSet<String>,
 ) -> (crate::diarization::voice_profiles::VoicesFile, usize) {
     let before = file.profiles.len();
-    file.profiles.retain(|profile| known.contains(resolve(redirects, &profile.person_id)));
+    // Your own voice has no contact row to wait for.
+    file.profiles.retain(|profile| {
+        profile.person_id == crate::diarization::voice_profiles::SELF_ID
+            || known.contains(resolve(redirects, &profile.person_id))
+    });
     let held = before - file.profiles.len();
     (file, held)
 }
@@ -1114,12 +1118,12 @@ mod tests {
     fn voices_for_contacts_not_here_yet_are_held_back() {
         use crate::diarization::voice_profiles::{VoiceProfile, VoicesFile};
         let profile = |id: &str| VoiceProfile { person_id: id.into(), name: id.into(), embedding: vec![0.0; 128], samples: 2, model: String::new(), sources: Vec::new() };
-        let file = VoicesFile { profiles: vec![profile("p-known"), profile("p-dup"), profile("p-later")], tombstones: Default::default() };
+        let file = VoicesFile { profiles: vec![profile("p-known"), profile("p-dup"), profile("p-later"), profile("self")], tombstones: Default::default() };
         let known: std::collections::HashSet<String> = ["p-known".to_string(), "p-kept".to_string()].into_iter().collect();
         let redirects = HashMap::from([("p-dup".to_string(), "p-kept".to_string())]);
         let (kept, held) = hold_unknown_voices(file, &redirects, &known);
         assert_eq!(held, 1);
-        assert_eq!(kept.profiles.iter().map(|profile| profile.person_id.as_str()).collect::<Vec<_>>(), vec!["p-known", "p-dup"]);
+        assert_eq!(kept.profiles.iter().map(|profile| profile.person_id.as_str()).collect::<Vec<_>>(), vec!["p-known", "p-dup", "self"]);
     }
 
     #[test]
