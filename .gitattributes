@@ -10,3 +10,6 @@ frontend/src-tauri/migrations/20260914010000_add_summary_max_tokens.sql text eol
 frontend/src-tauri/migrations/20260926010000_add_groups.sql text eol=lf
 frontend/src-tauri/migrations/20260928000000_unified_workspace.sql text eol=lf
 frontend/src-tauri/migrations/20260928010000_reset_placeholder_titles.sql text eol=lf
+frontend/src-tauri/migrations/20261027000000_add_voice_speaker_matches.sql text eol=lf
+frontend/src-tauri/migrations/20261027010000_add_sync.sql text eol=lf
+frontend/src-tauri/migrations/20261027020000_add_meeting_calendar_events.sql text eol=lf
