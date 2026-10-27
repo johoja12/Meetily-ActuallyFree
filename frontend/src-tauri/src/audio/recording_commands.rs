@@ -240,7 +240,9 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
         meeting_name
     );
 
-    let engine_lifecycle_guard = super::common::acquire_engine_lifecycle_lock().await;
+    // A transcript re-run holds the engine until its last segment; a
+    // recording takes priority and pauses it instead of waiting silently.
+    let engine_lifecycle_guard = super::common::acquire_engine_lock_for_recording(&app).await?;
 
     // Check if already recording
     let current_recording_state = IS_RECORDING.load(Ordering::SeqCst);
@@ -609,7 +611,9 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
         mic_device_name, system_device_name, meeting_name
     );
 
-    let engine_lifecycle_guard = super::common::acquire_engine_lifecycle_lock().await;
+    // A transcript re-run holds the engine until its last segment; a
+    // recording takes priority and pauses it instead of waiting silently.
+    let engine_lifecycle_guard = super::common::acquire_engine_lock_for_recording(&app).await?;
 
     // Check if already recording
     let current_recording_state = IS_RECORDING.load(Ordering::SeqCst);

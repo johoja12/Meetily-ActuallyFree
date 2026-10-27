@@ -238,7 +238,12 @@ checkbox; `lib/post-call-preferences.ts`, per computer) makes the worker run onc
 per meeting as if Auto-detect & continue were clicked; a failure stops at the
 error card. `start_retranscription_command` resolves the meeting's current folder
 from the database (`current_meeting_folder`), because library sync can move a
-finished recording while the card waits. Related
+finished recording while the card waits. A transcript re-run holds the engine
+lifecycle lock until its last segment, so starting a recording uses
+`acquire_engine_lock_for_recording`: it stops the re-run at its next segment,
+emits `retranscription-paused-for-recording`, and waits at most 30 s instead of
+until the re-run would finish. The card shows "Paused while you record" and
+starts the re-run over 5 s after `recording-stopped`. Related
 speaker/retranscription dialogs. `useDiarizationEngine.ts` refreshes selected-engine
 state for dialogs, including native activation events and stale-response guards.
 
