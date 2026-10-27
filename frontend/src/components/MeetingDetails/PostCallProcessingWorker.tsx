@@ -31,7 +31,7 @@ import { isVisibleParakeetModel } from '@/lib/parakeet';
 import { announceChange } from '@/lib/workspace-api';
 import { readAutoIdentifySpeakers, writeAutoIdentifySpeakers } from '@/lib/post-call-preferences';
 
-type Stage = 'idle' | 'prompt' | 'enhancing' | 'diarizing' | 'refreshing' | 'error';
+type Stage = 'idle' | 'prompt' | 'enhancing' | 'diarizing' | 'refreshing' | 'paused' | 'error';
 type FailedStage = 'enhancing' | 'diarizing' | 'pre-diarization-refresh' | 'post-diarization-refresh';
 
 interface RetranscriptionProgress {
@@ -227,6 +227,10 @@ export function PostCallProcessingWorker({
   const [cancelling, setCancelling] = useState(false);
   const [automatic, setAutomatic] = useState(readAutoIdentifySpeakers);
   const autoStartedRef = useRef<string | null>(null);
+  // A recording started while this re-run was working: native stopped it so
+  // the recording could have the engine. It starts over when the recording ends.
+  const pausedForRecording = useRef(false);
+  const resumeAuto = useRef(false);
 
   const checkCancelled = () => {
     if (cancellation.current.signal.aborted) throw new Error('Post-call processing cancelled.');
@@ -332,6 +336,7 @@ export function PostCallProcessingWorker({
   const start = async (auto = false) => {
     if (running.current) return;
     const count = auto ? null : getSelectedSpeakerCount();
+    resumeAuto.current = auto || count === null;
     if (count === undefined) return;
     running.current = true;
     cancellation.current = new AbortController();
@@ -350,6 +355,13 @@ export function PostCallProcessingWorker({
         await runWorkflow(count);
       }
     } catch (cause) {
+      if (pausedForRecording.current) {
+        pausedForRecording.current = false;
+        setFailedStage(null);
+        setError(null);
+        setStage('paused');
+        return;
+      }
       const nextError = cause instanceof Error ? cause.message : String(cause);
       setFailedStage(activeStageRef.current);
       setError(nextError);
@@ -360,6 +372,28 @@ export function PostCallProcessingWorker({
       setCancelling(false);
     }
   };
+
+  useEffect(() => {
+    let stop: UnlistenFn | undefined;
+    let disposed = false;
+    void listen<{ meeting_id: string }>('retranscription-paused-for-recording', (event) => {
+      if (event.payload.meeting_id === meetingId) pausedForRecording.current = true;
+    }).then((unlisten) => (disposed ? unlisten() : (stop = unlisten)));
+    return () => { disposed = true; stop?.(); };
+  }, [meetingId]);
+
+  // Paused for a recording: start over once it has stopped and saved.
+  useEffect(() => {
+    if (stage !== 'paused') return;
+    let stop: UnlistenFn | undefined;
+    let disposed = false;
+    void listen('recording-stopped', () => {
+      stop?.();
+      // Let the new recording's own save and checks go first.
+      setTimeout(() => { if (!disposed) void start(resumeAuto.current); }, 5000);
+    }).then((unlisten) => (disposed ? unlisten() : (stop = unlisten)));
+    return () => { disposed = true; stop?.(); };
+  });
 
   // "Identify speakers automatically": run once per meeting as soon as the
   // engine is known, instead of waiting at the prompt. A failure stops at the
@@ -411,6 +445,8 @@ export function PostCallProcessingWorker({
       title={
         isWorking
           ? 'Improving the transcript'
+          : stage === 'paused'
+            ? 'Paused while you record'
           : stage === 'error'
             ? 'Could not finish that step'
             : isNemotron
@@ -420,6 +456,8 @@ export function PostCallProcessingWorker({
       detail={
         isWorking
           ? message
+          : stage === 'paused'
+            ? 'Improving this transcript continues when the recording ends.'
           : isNemotron
             ? 'Automatically identify up to 8 speakers from the full recording.'
             : 'Include yourself. A real count labels speakers more accurately.'
@@ -441,6 +479,12 @@ export function PostCallProcessingWorker({
               style={{ width: `${visibleProgress}%` }}
             />
           </div>
+        </div>
+      ) : stage === 'paused' ? (
+        <div className="flex justify-center">
+          <Button variant="ghost" onClick={() => { void continueWithLiveTranscript(); }}>
+            Keep live transcript
+          </Button>
         </div>
       ) : (
         <div className="space-y-3">

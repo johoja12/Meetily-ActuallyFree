@@ -37,6 +37,46 @@ pub(crate) async fn acquire_engine_lifecycle_lock() -> OwnedMutexGuard<()> {
     ENGINE_LIFECYCLE_LOCK.clone().lock_owned().await
 }
 
+/// The engine lock for starting a recording. A recording takes priority over
+/// a running transcript re-run, which holds this lock until its last segment:
+/// when the lock is busy, `preempt` asks that re-run to stop (returning its
+/// meeting so the window can resume it after the recording), and the start
+/// waits at most `wait` instead of silently until the re-run would finish.
+pub(crate) async fn acquire_lock_preempting(
+    lock: Arc<AsyncMutex<()>>,
+    preempt: impl FnOnce() -> Option<String>,
+    wait: std::time::Duration,
+) -> Result<(OwnedMutexGuard<()>, Option<String>), String> {
+    if let Ok(guard) = lock.clone().try_lock_owned() {
+        return Ok((guard, None));
+    }
+    let preempted = preempt();
+    match tokio::time::timeout(wait, lock.lock_owned()).await {
+        Ok(guard) => Ok((guard, preempted)),
+        Err(_) => Err("Meetily is still finishing another transcription. Try again in a moment.".into()),
+    }
+}
+
+/// The engine lock for starting a recording: stops a running transcript
+/// re-run (`retranscription-paused-for-recording` tells the window which
+/// meeting, so it can resume it) and waits up to 30 s for it to let go.
+pub(crate) async fn acquire_engine_lock_for_recording<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<OwnedMutexGuard<()>, String> {
+    use tauri::Emitter;
+    let (guard, preempted) = acquire_lock_preempting(
+        ENGINE_LIFECYCLE_LOCK.clone(),
+        super::retranscription::preempt_for_recording,
+        std::time::Duration::from_secs(30),
+    )
+    .await?;
+    if let Some(meeting_id) = preempted {
+        info!("Paused the transcript re-run of {meeting_id} to start recording");
+        let _ = app.emit("retranscription-paused-for-recording", serde_json::json!({ "meeting_id": meeting_id }));
+    }
+    Ok(guard)
+}
+
 /// Keeps a batch transcription's model loaded until every segment finishes.
 /// Idle cleanup, manual memory cleanup, and LLM startup all use the same lock.
 pub(crate) struct SttBatchLease {
@@ -408,6 +448,37 @@ pub(crate) fn split_segment_at_silence(
     }
 
     result
+}
+
+#[cfg(test)]
+mod preempt_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn a_free_lock_is_taken_without_stopping_anything() {
+        let lock = Arc::new(AsyncMutex::new(()));
+        let (_guard, preempted) = acquire_lock_preempting(lock, || panic!("nothing to stop"), Duration::from_secs(1)).await.unwrap();
+        assert_eq!(preempted, None);
+    }
+
+    #[tokio::test]
+    async fn a_busy_lock_stops_the_rerun_and_is_taken_once_it_lets_go() {
+        let lock = Arc::new(AsyncMutex::new(()));
+        let held = lock.clone().lock_owned().await;
+        // The re-run notices the stop request at its next segment and lets go.
+        tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(50)).await; drop(held); });
+        let (_guard, preempted) = acquire_lock_preempting(lock, || Some("m1".into()), Duration::from_secs(2)).await.unwrap();
+        assert_eq!(preempted.as_deref(), Some("m1"));
+    }
+
+    #[tokio::test]
+    async fn a_lock_that_stays_busy_gives_up_with_a_reason() {
+        let lock = Arc::new(AsyncMutex::new(()));
+        let _held = lock.clone().lock_owned().await;
+        let error = acquire_lock_preempting(lock, || None, Duration::from_millis(50)).await.unwrap_err();
+        assert!(error.contains("Try again"), "{error}");
+    }
 }
 
 #[cfg(test)]

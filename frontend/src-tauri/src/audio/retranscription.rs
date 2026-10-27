@@ -92,6 +92,17 @@ pub fn is_retranscription_in_progress() -> bool {
     RETRANSCRIPTION_IN_PROGRESS.load(Ordering::SeqCst)
 }
 
+/// A recording is starting: stop the running re-run at its next segment.
+/// Returns its meeting, or None when nothing is running.
+pub fn preempt_for_recording() -> Option<String> {
+    let owner = RETRANSCRIPTION_MEETING.lock().ok()?.clone();
+    if !is_retranscription_in_progress() {
+        return None;
+    }
+    cancel_retranscription();
+    owner
+}
+
 /// Cancel ongoing retranscription
 pub fn cancel_retranscription() {
     RETRANSCRIPTION_CANCELLED.store(true, Ordering::SeqCst);
