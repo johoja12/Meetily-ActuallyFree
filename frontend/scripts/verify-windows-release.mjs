@@ -17,7 +17,7 @@ const platform = latest.platforms['windows-x86_64'];
 assert.equal(latest.version, version);
 assert.equal(typeof latest.notes, 'string', 'Updater notes must be plain text, not PowerShell file metadata');
 assert.deepEqual(Object.keys(latest.platforms), ['windows-x86_64']);
-assert.equal(platform.url, `https://github.com/TylerBuza/Meetily-ActuallyFree/releases/download/v${version}/${engine}`);
+assert.equal(platform.url, `https://github.com/johoja12/Meetily-ActuallyFree/releases/download/v${version}/${engine}`);
 assert.equal(platform.signature, (await readFile(join(dist, `${engine}.sig`), 'utf8')).trim());
 
 async function hash(path, algorithm = 'sha256') {

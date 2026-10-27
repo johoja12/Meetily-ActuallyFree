@@ -109,7 +109,7 @@ if ($BootstrapperOnly) {
   }
   $latestMetadata = Get-Content $latestPath -Raw | ConvertFrom-Json
   $latestPlatform = $latestMetadata.platforms.'windows-x86_64'
-  $expectedUpdaterUrl = "https://github.com/TylerBuza/Meetily-ActuallyFree/releases/download/v${appVersion}/$(Split-Path $engineOutput -Leaf)"
+  $expectedUpdaterUrl = "https://github.com/johoja12/Meetily-ActuallyFree/releases/download/v${appVersion}/$(Split-Path $engineOutput -Leaf)"
   $expectedUpdaterSignature = (Get-Content $updaterSignatureOutput -Raw).Trim()
   if ($latestMetadata.version -ne $appVersion -or
       $latestPlatform.url -ne $expectedUpdaterUrl -or
@@ -307,7 +307,7 @@ $releaseNotes = if (Test-Path $notesPath) {
     # PowerShell can serialize that as an object (including filesystem details),
     # but the updater requires notes to be plain text.
     [System.IO.File]::ReadAllText($notesPath)
-} else { "Meetily $appVersion. See https://github.com/TylerBuza/Meetily-ActuallyFree/releases/tag/v$appVersion for release notes." }
+} else { "Meetily $appVersion. See https://github.com/johoja12/Meetily-ActuallyFree/releases/tag/v$appVersion for release notes." }
 $latest = [ordered]@{
   version = $appVersion
     notes = $releaseNotes
@@ -315,7 +315,7 @@ $latest = [ordered]@{
   platforms = [ordered]@{
     "windows-x86_64" = [ordered]@{
       signature = $signature
-      url = "https://github.com/TylerBuza/Meetily-ActuallyFree/releases/download/v${appVersion}/${installerName}"
+      url = "https://github.com/johoja12/Meetily-ActuallyFree/releases/download/v${appVersion}/${installerName}"
     }
   }
 }

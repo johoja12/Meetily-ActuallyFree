@@ -291,6 +291,16 @@ verifier requires `notes` to be a string. This was caught during v0.2.18 draft
 preparation; the manifest/checksums were regenerated and reverified without
 changing the signed executable payloads.
 
+Release distribution points at the `johoja12/Meetily-ActuallyFree` fork: the
+updater endpoint in `tauri.conf.json`, the `latest.json` installer URL written by
+the packager and asserted by the verifier, and the CUDA reconfiguration
+`setup_download_url` in `whisper_engine/commands.rs`. Model assets (Parakeet,
+diarization) still download from upstream release tags, which the fork does not
+mirror. The `updater.pubkey` is still upstream's, so a fork `latest.json` will
+fail signature verification until the pubkey is replaced with one whose private
+key signs fork releases (`TAURI_SIGNING_PRIVATE_KEY`). Builds before this change
+still poll upstream's `latest.json`. macOS has no updater manifest.
+
 ## 6. Tests, qualification, and historical notes
 
 macOS publication supports an explicitly labeled CI-qualified preview via

@@ -145,7 +145,7 @@
         "updater": {
             "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc1MjA0M0FCMkRCNzM2QUIKUldTck5yY3RxME1nZFZmNTlaSFpLYVYxelh1RFp6cE9lOFZ2VkE0VlFXdThWUzRUK091c2ZQQ3AK",
             "endpoints": [
-                "https://github.com/TylerBuza/Meetily-ActuallyFree/releases/latest/download/latest.json"
+                "https://github.com/johoja12/Meetily-ActuallyFree/releases/latest/download/latest.json"
             ]
         }
     }
