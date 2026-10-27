@@ -1,11 +1,11 @@
 'use client';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { invoke } from '@tauri-apps/api/core';
 import { CalendarDays } from 'lucide-react';
 import { toast } from 'sonner';
 import { useCalendar } from '@/hooks/useCalendar';
-import { calendarTitleSuggestions, selectCalendarRecording, type CalendarMeeting } from '@/lib/calendar-meetings';
+import { calendarTitleSuggestions, OPEN_CALENDAR_TITLE_EVENT, selectCalendarRecording, type CalendarMeeting } from '@/lib/calendar-meetings';
 import { launchRecording } from '@/lib/recording-launch';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
@@ -52,9 +52,15 @@ export function CalendarAgenda() {
   );
 }
 
-export function CalendarTitleSuggestions({ startedAt, onSelect, disabled = false }: { startedAt: number; onSelect: (title: string) => void; disabled?: boolean }) {
+export function CalendarTitleSuggestions({ startedAt, onSelect, disabled = false }: { startedAt: number; onSelect: (event: CalendarMeeting) => void; disabled?: boolean }) {
   const { snapshot } = useCalendar();
   const [open, setOpen] = useState(false);
+  // "Choose" on the record-start toast opens this menu.
+  useEffect(() => {
+    const show = () => setOpen(true);
+    window.addEventListener(OPEN_CALENDAR_TITLE_EVENT, show);
+    return () => window.removeEventListener(OPEN_CALENDAR_TITLE_EVENT, show);
+  }, []);
   if (!snapshot?.settings.enabled || !snapshot.settings.suggest_titles) return null;
   const events = calendarTitleSuggestions(snapshot.events, startedAt).slice(0, 8);
   if (!events.length) return null;
@@ -62,7 +68,7 @@ export function CalendarTitleSuggestions({ startedAt, onSelect, disabled = false
     <PopoverTrigger asChild><Button variant="ghost" size="sm" disabled={disabled}><CalendarDays />Calendar title</Button></PopoverTrigger>
     <PopoverContent align="start" className="w-80 rounded-xl border border-af-border bg-af-elevated p-2 text-af-text">
       <p className="px-2 py-2 text-xs text-af-text-3">Which event are you recording?</p>
-      {events.map(event => <button type="button" key={`${event.id}:${event.start_ms}`} className="block w-full rounded-lg px-2 py-2 text-left hover:bg-af-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-af-accent" onClick={() => { onSelect(event.title); setOpen(false); }}>
+      {events.map(event => <button type="button" key={`${event.id}:${event.start_ms}`} className="block w-full rounded-lg px-2 py-2 text-left hover:bg-af-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-af-accent" onClick={() => { onSelect(event); setOpen(false); }}>
         <span className="block text-sm font-medium">{event.title}</span><span className="mt-1 block text-xs text-af-text-3">{calendarTime(event)} · {event.calendar_name}</span>
       </button>)}
     </PopoverContent>

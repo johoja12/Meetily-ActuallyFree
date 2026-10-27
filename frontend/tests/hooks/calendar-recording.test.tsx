@@ -13,10 +13,14 @@ const messages: Array<{ title: string; options: any }> = [];
 const values = new Map<string, string>();
 const storage = { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key) };
 const intervals = new Map<number, () => void>();
+const listeners = new Map<string, Array<() => void>>();
 const reload = mock(async () => {});
 const start = mock(() => {});
 Object.assign(globalThis, { React, sessionStorage: storage, window: {
-  sessionStorage: storage, localStorage: storage, location: { pathname: '/' }, dispatchEvent: () => true,
+  sessionStorage: storage, localStorage: storage, location: { pathname: '/' },
+  dispatchEvent: (event: { type: string }) => { listeners.get(event.type)?.forEach(handler => handler()); return true; },
+  addEventListener: (type: string, handler: () => void) => listeners.set(type, [...(listeners.get(type) ?? []), handler]),
+  removeEventListener: (type: string, handler: () => void) => listeners.set(type, (listeners.get(type) ?? []).filter(item => item !== handler)),
   setInterval: (callback: () => void) => { const id = intervals.size + 1; intervals.set(id, callback); return id; },
   clearInterval: (id: number) => intervals.delete(id),
 } });
@@ -24,7 +28,8 @@ const toast = Object.assign((title: string, options: any) => messages.push({ tit
 mock.module('sonner', () => ({ toast }));
 mock.module('next/navigation', () => ({ useRouter: () => ({ push: () => {} }) }));
 mock.module('@/hooks/useCalendar', () => ({ useCalendar: () => ({ snapshot, error: null, reload }) }));
-mock.module('@/components/ui/popover', () => ({ Popover: ({ children }: any) => children, PopoverTrigger: ({ children }: any) => children, PopoverContent: ({ children }: any) => <div>{children}</div> }));
+const opened: boolean[] = [];
+mock.module('@/components/ui/popover', () => ({ Popover: ({ children, open }: any) => { opened.push(!!open); return children; }, PopoverTrigger: ({ children }: any) => children, PopoverContent: ({ children }: any) => <div>{children}</div> }));
 mock.module('@tauri-apps/api/event', () => ({ listen: async () => () => {} }));
 mock.module('@tauri-apps/api/core', () => ({ invoke: async (command: string, args: any) => {
   calls.push([command, args]);
@@ -85,6 +90,16 @@ test('calendar title choices preserve overlaps and only rename on explicit selec
   expect(choices).toHaveLength(2);
   await act(async () => { choices[0].props.onClick(); });
   expect(selected).toHaveBeenCalledTimes(1);
+});
+
+test('the record-start Choose action opens the calendar title menu with the chosen event', async () => {
+  const selected = mock((_event: any) => {});
+  const root = await mount(<CalendarTitleSuggestions startedAt={Date.now()} onSelect={selected} />);
+  expect(opened.at(-1)).toBe(false);
+  await act(async () => { (globalThis as any).window.dispatchEvent({ type: 'af-open-calendar-title' }); });
+  expect(opened.at(-1)).toBe(true);
+  await act(async () => { root.root.findAllByType('button').filter(button => button.props.onClick)[0].props.onClick(); });
+  expect((selected.mock.calls[0] as any[])[0].id).toBe(snapshot.events[0].id);
 });
 
 test('permission is requested only on Connect, and failure does not enable the feature', async () => {

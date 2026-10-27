@@ -7,8 +7,9 @@ import { useConfig } from '@/contexts/ConfigContext';
 import { useRecordingState, RecordingStatus } from '@/contexts/RecordingStateContext';
 import { recordingService } from '@/services/recordingService';
 import { readPendingGroup } from '@/lib/groups';
-import { takeCalendarRecording } from '@/lib/calendar-meetings';
-import { automaticTitle, beginLiveSession } from '@/lib/live-session';
+import { autoCalendarChoice, OPEN_CALENDAR_TITLE_EVENT, takeCalendarRecording, type AutoCalendarChoice } from '@/lib/calendar-meetings';
+import { automaticTitle, beginLiveSession, readLiveTitle, undoCalendarTitle } from '@/lib/live-session';
+import type { CalendarSnapshot } from '@/hooks/useCalendar';
 import { AUTO_START_KEY, START_RECORDING_EVENT } from '@/lib/recording-launch';
 import { beginAutomatedRecording, endAutomatedRecording, takeAutomatedStart } from '@/lib/meeting-automation';
 import Analytics from '@/lib/analytics';
@@ -22,6 +23,19 @@ interface UseRecordingStartReturn {
 }
 
 type StartSource = 'home_page' | 'sidebar_auto' | 'sidebar_direct';
+
+/** The calendar meeting happening now, from the native cache (no new query). */
+async function currentCalendarChoice(now: number): Promise<AutoCalendarChoice> {
+  try {
+    const snapshot = await invoke<CalendarSnapshot>('calendar_snapshot');
+    if (!snapshot.settings.enabled || !snapshot.settings.suggest_titles) return null;
+    return autoCalendarChoice(snapshot.events, now);
+  } catch {
+    return null;
+  }
+}
+
+const openCalendarTitles = () => window.dispatchEvent(new CustomEvent(OPEN_CALENDAR_TITLE_EVENT));
 
 /**
  * Starts recordings, from the record button, from the sidebar or a group
@@ -166,8 +180,14 @@ export function useRecordingStart(
     try {
       const startedAt = Date.now();
       const group = readPendingGroup();
-      const calendarEvent = takeCalendarRecording(startedAt);
-      const title = calendarEvent?.title ?? automaticTitle(new Date(startedAt), group?.name, meetings.map((meeting) => meeting.title));
+      const automatic = automaticTitle(new Date(startedAt), group?.name, meetings.map((meeting) => meeting.title));
+      // A reminder's Record button already chose the event. Otherwise the one
+      // calendar meeting happening now names the recording, unless a group
+      // was chosen for it.
+      let calendarEvent = takeCalendarRecording(startedAt);
+      const choice = calendarEvent || group ? null : await currentCalendarChoice(startedAt);
+      if (choice?.kind === 'one') calendarEvent = choice.event;
+      const title = calendarEvent?.title ?? automatic;
       setMeetingTitle(title);
       setStatus(RecordingStatus.STARTING, 'Starting audio capture…');
 
@@ -178,7 +198,7 @@ export function useRecordingStart(
       );
 
       // RECORDING status itself arrives from Rust via RecordingStateContext.
-      beginLiveSession(title, startedAt, !!calendarEvent);
+      beginLiveSession(title, startedAt, !!calendarEvent, calendarEvent);
       setIsRecording(true);
       clearTranscripts();
       setIsMeetingActive(true);
@@ -190,6 +210,29 @@ export function useRecordingStart(
           description: 'Meeting automation started it, and stops and saves it when the call ends.',
           duration: 10000,
           action: { label: "Don't stop it", onClick: () => endAutomatedRecording() },
+        });
+      }
+      if (choice?.kind === 'one') {
+        toast(`Named from calendar: ${title}`, {
+          duration: 10000,
+          action: {
+            label: 'Undo',
+            onClick: () => {
+              // Recomputed now: a group picked since the start names it.
+              const live = readLiveTitle();
+              const restored = automaticTitle(new Date(live?.startedAt ?? startedAt), readPendingGroup()?.name, meetings.map((meeting) => meeting.title));
+              const outcome = undoCalendarTitle(restored, choice.event.id);
+              if (outcome === 'undone') setMeetingTitle(restored);
+              else toast.info(outcome === 'ended' ? 'The recording has ended. Rename it from the meeting page.' : 'This recording was already renamed');
+            },
+          },
+          cancel: { label: 'Choose another', onClick: openCalendarTitles },
+        });
+      } else if (choice?.kind === 'many') {
+        toast(`${choice.count} calendar meetings now`, {
+          description: 'Choose the one you are recording to name it and offer its attendees as speakers.',
+          duration: 10000,
+          action: { label: 'Choose', onClick: openCalendarTitles },
         });
       }
       await showRecordingNotification();

@@ -781,6 +781,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn calendar_links_travel_and_follow_meeting_deletes() {
+        let (library, root) = temp_library("calendar-link");
+        let mut a = Device::new("a").await;
+        let mut b = Device::new("b").await;
+        a.sql(MEETING).await;
+        a.sql("INSERT INTO meeting_calendar_events (meeting_id, event_id, title, start_ms, end_ms, attendees, linked_at) \
+               VALUES ('m1', 'e1', 'Standup', 1, 2, '[{\"name\":\"Jane Doe\",\"email\":\"jane@a.com\",\"organizer\":false}]', 'l');").await;
+        a.sync(&library).await;
+        b.sync(&library).await;
+        assert_eq!(b.text("SELECT event_id FROM meeting_calendar_events").await, vec!["e1".to_string()]);
+        assert_eq!(a.synced_rows().await, b.synced_rows().await);
+        assert!(crate::database::repositories::meeting::MeetingsRepository::delete_meeting(&b.pool, "m1").await.unwrap());
+        b.sync(&library).await;
+        a.sync(&library).await;
+        assert!(a.text("SELECT event_id FROM meeting_calendar_events").await.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn import_does_not_echo() {
         let (library, root) = temp_library("echo");
         let mut a = Device::new("a").await;
