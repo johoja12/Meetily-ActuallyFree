@@ -1000,6 +1000,26 @@ pub struct RetranscriptionStarted {
 }
 
 // Start retranscription (Beta gated using configContext.betaFeatures)
+/// The meeting's recording folder as the database has it now. Library sync
+/// moves finished recordings into the shared folder, so a path the window
+/// read earlier can be stale; the caller's path is the fallback.
+pub(crate) async fn current_meeting_folder(pool: &sqlx::SqlitePool, meeting_id: &str, given: String) -> String {
+    let saved: Option<String> = sqlx::query_scalar("SELECT folder_path FROM meetings WHERE id = ?")
+        .bind(meeting_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .flatten();
+    match saved {
+        Some(folder) if folder != given && Path::new(&folder).is_dir() => {
+            info!("Using the meeting's current recording folder {folder} (the window had {given})");
+            folder
+        }
+        _ => given,
+    }
+}
+
 #[tauri::command]
 pub async fn start_retranscription_command<R: Runtime>(
     app: AppHandle<R>,
@@ -1037,6 +1057,8 @@ pub async fn start_retranscription_command<R: Runtime>(
     let vocabulary = VocabularyRepository::get_effective(pool, Some(&meeting_id))
         .await
         .map_err(|error| error.to_string())?;
+
+    let meeting_folder_path = current_meeting_folder(pool, &meeting_id, meeting_folder_path).await;
 
     // Clone values for the spawned task
     let meeting_id_clone = meeting_id.clone();
@@ -1091,6 +1113,28 @@ pub async fn is_retranscription_in_progress_command(meeting_id: Option<String>) 
             RETRANSCRIPTION_MEETING.lock().unwrap().as_deref() == Some(expected.as_str())
         }
         None => is_retranscription_in_progress(),
+    }
+}
+
+#[cfg(test)]
+mod folder_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_moved_recording_is_found_where_the_database_says() {
+        let root = std::env::temp_dir().join(format!("meetily-retranscribe-folder-{}", std::process::id()));
+        let moved = root.join("library").join("recordings").join("Meeting");
+        std::fs::create_dir_all(&moved).unwrap();
+        let pool = crate::sync::test_support::migrated_pool().await;
+        sqlx::query("INSERT INTO meetings (id, title, created_at, updated_at, folder_path) VALUES ('m1', 'T', 'c', 'u', ?)")
+            .bind(moved.to_string_lossy().as_ref()).execute(&pool).await.unwrap();
+        let stale = root.join("old").join("Meeting").to_string_lossy().to_string();
+        assert_eq!(current_meeting_folder(&pool, "m1", stale.clone()).await, moved.to_string_lossy());
+        // Unknown meeting, or a database path that is gone: keep the caller's.
+        assert_eq!(current_meeting_folder(&pool, "missing", stale.clone()).await, stale);
+        std::fs::remove_dir_all(&moved).unwrap();
+        assert_eq!(current_meeting_folder(&pool, "m1", stale.clone()).await, stale);
+        let _ = std::fs::remove_dir_all(root);
     }
 }
 

@@ -8,7 +8,8 @@ Object.assign(globalThis, { React, window: { dispatchEvent: (event: any) => { di
   Event: class { constructor(public type: string) {} } });
 let handler: ((event: { payload: any }) => void) | null = null;
 mock.module('@tauri-apps/api/event', () => ({ listen: async (_name: string, callback: any) => { handler = callback; return () => {}; } }));
-mock.module('@/lib/workspace-api', () => ({ announceChange: () => {} }));
+const announced: any[] = [];
+mock.module('@/lib/workspace-api', () => ({ announceChange: (kind: string, detail?: any) => announced.push({ kind, ...detail }) }));
 mock.module('@/lib/voice-matches', () => ({ announceVoiceMatchChanges: () => {} }));
 const { SyncNotifier } = await import('../../src/components/SyncNotifier');
 
@@ -16,4 +17,8 @@ test('meetings imported by sync refresh their calendar invite', async () => {
   await act(async () => { create(<SyncNotifier />); });
   await act(async () => { handler!({ payload: { meeting_ids: ['m1', 'm2'], library: false, voices: false } }); });
   expect(dispatched.filter(event => event.type === 'af-meeting-calendar-link').map(event => event.detail.meetingId)).toEqual(['m1', 'm2']);
+});
+
+test('each synced or moved meeting tells its open page to reload', () => {
+  expect(announced.filter(item => item.source === 'sync').map(item => item.meetingId)).toEqual(['m1', 'm2']);
 });

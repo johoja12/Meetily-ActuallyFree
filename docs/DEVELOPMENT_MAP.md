@@ -216,7 +216,13 @@ navigation by `frontend/src/contexts/PostCallJobsContext.tsx`. The page's
 `PostCallProcessingDialog.tsx` registers/detaches only its view. Completion and
 transcript refresh target the matching mounted meeting; inactive meetings refresh
 on return. See [OCTOBER_PR_INTEGRATION.md](OCTOBER_PR_INTEGRATION.md) for cancellation
-ownership and lifecycle limits. Related
+ownership and lifecycle limits. "Identify speakers automatically after each
+recording" (Settings > Transcription > Speaker Identification, or the card's
+checkbox; `lib/post-call-preferences.ts`, per computer) makes the worker run once
+per meeting as if Auto-detect & continue were clicked; a failure stops at the
+error card. `start_retranscription_command` resolves the meeting's current folder
+from the database (`current_meeting_folder`), because library sync can move a
+finished recording while the card waits. Related
 speaker/retranscription dialogs. `useDiarizationEngine.ts` refreshes selected-engine
 state for dialogs, including native activation events and stale-response guards.
 

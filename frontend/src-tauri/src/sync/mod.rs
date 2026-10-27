@@ -186,12 +186,17 @@ async fn run_pass(pool: &SqlitePool, config: &SyncConfig, voices: bool) -> anyho
         voices_changed = engine::import_voices(pool, &library, device).await?;
         engine::export_voices(&library, device)?;
     }
-    if !relocate::relocate_settled(pool, &library, std::time::SystemTime::now(), &config.previous_roots).await.is_empty() {
+    let moved = relocate::relocate_settled(pool, &library, std::time::SystemTime::now(), &config.previous_roots).await;
+    if !moved.is_empty() {
         engine::export(pool, &library, device, &mut clock).await?;
     }
     write_device_info(&library, config)?;
+    // A moved recording changes its meeting's folder, so open pages reload it
+    // like an imported meeting.
+    let mut meeting_ids: Vec<String> = imported.meetings.into_iter().collect();
+    meeting_ids.extend(moved.into_iter().filter(|id| !meeting_ids.contains(id)).collect::<Vec<_>>());
     Ok(Imported {
-        meeting_ids: imported.meetings.into_iter().collect(),
+        meeting_ids,
         library: imported.library,
         voices: voices_changed,
     })

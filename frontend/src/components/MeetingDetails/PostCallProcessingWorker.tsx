@@ -29,6 +29,7 @@ import { PostCallHandoffCard } from '@/components/PostCallHandoffCard';
 import type { RawModelInfo } from '@/hooks/useTranscriptionModels';
 import { isVisibleParakeetModel } from '@/lib/parakeet';
 import { announceChange } from '@/lib/workspace-api';
+import { readAutoIdentifySpeakers, writeAutoIdentifySpeakers } from '@/lib/post-call-preferences';
 
 type Stage = 'idle' | 'prompt' | 'enhancing' | 'diarizing' | 'refreshing' | 'error';
 type FailedStage = 'enhancing' | 'diarizing' | 'pre-diarization-refresh' | 'post-diarization-refresh';
@@ -224,6 +225,8 @@ export function PostCallProcessingWorker({
   const cancellation = useRef(new AbortController());
   const running = useRef(false);
   const [cancelling, setCancelling] = useState(false);
+  const [automatic, setAutomatic] = useState(readAutoIdentifySpeakers);
+  const autoStartedRef = useRef<string | null>(null);
 
   const checkCancelled = () => {
     if (cancellation.current.signal.aborted) throw new Error('Post-call processing cancelled.');
@@ -325,9 +328,10 @@ export function PostCallProcessingWorker({
     return count;
   };
 
-  const start = async () => {
+  /** `auto`: detect the number of speakers, as "Auto-detect & continue" does. */
+  const start = async (auto = false) => {
     if (running.current) return;
-    const count = getSelectedSpeakerCount();
+    const count = auto ? null : getSelectedSpeakerCount();
     if (count === undefined) return;
     running.current = true;
     cancellation.current = new AbortController();
@@ -356,6 +360,16 @@ export function PostCallProcessingWorker({
       setCancelling(false);
     }
   };
+
+  // "Identify speakers automatically": run once per meeting as soon as the
+  // engine is known, instead of waiting at the prompt. A failure stops at the
+  // error card, which offers Retry; it never retries on its own.
+  useEffect(() => {
+    if (!automatic || stage !== 'prompt' || !engine || engineError) return;
+    if (autoStartedRef.current === meetingId) return;
+    autoStartedRef.current = meetingId;
+    void start(true);
+  });
 
   const continueWithLiveTranscript = async () => {
     try {
@@ -484,6 +498,18 @@ export function PostCallProcessingWorker({
             </>
           )}
           {error && <p className="text-sm text-af-danger">{error}</p>}
+          <label className="flex items-center gap-2 text-xs text-af-text-3">
+            <input
+              type="checkbox"
+              checked={automatic}
+              onChange={(event) => {
+                setAutomatic(event.target.checked);
+                writeAutoIdentifySpeakers(event.target.checked);
+              }}
+              aria-label="Identify speakers automatically after every recording"
+            />
+            Do this automatically after every recording
+          </label>
           <div className={cn('flex items-center gap-2', isNemotron ? 'justify-center' : 'justify-end')}>
             <Button variant="ghost" onClick={() => { void continueWithLiveTranscript(); }}>
               Keep live transcript
