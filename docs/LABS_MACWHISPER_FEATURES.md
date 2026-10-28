@@ -80,6 +80,28 @@ input without output. A detection
 event is not proof a meeting is underway; users should test the Labs action
 against their conferencing apps before relying on it.
 
+### Noticing when a meeting ends
+
+`components/recording/MeetingEndWatcher.tsx` (main window only) watches any
+running recording and asks "Stop & save / Keep recording". The decision is pure
+and tested in `lib/meeting-end.ts`:
+- the meeting app hung up (`meeting-ended`, emitted 45 s after a known app stops
+  using microphone and speakers), unless meeting automation owns that recording;
+- both sources quiet (`recording-audio-levels` RMS below 0.01, about -40 dBFS)
+  for 3 minutes, or 1 minute once the linked calendar event's end has passed
+  (`readLiveTitle().calendarEvent.end_ms`);
+- two goodbye phrases in the final live transcript within 90 s, then 15 s of
+  quiet, within 5 minutes of the calendar end or at any time without an event.
+  This needs live transcription; post-call-only recordings rely on the others.
+A pause, or a gap in level events, restarts the quiet clock; stale levels never
+count as silence. Keep recording (or closing the prompt) snoozes it for 10
+minutes and forgets the goodbyes. Settings > Meeting detection has the switch
+(on by default) and an opt-in "Stop and save automatically if I don't answer
+within 1 minute". Stopping uses the normal stop-and-save path. Prompts live in
+the WebView; a closed window loses only the prompt, never capture. Thresholds
+are not yet qualified against real calls; a muted listener in a long silent
+stretch will be asked.
+
 ## Feature 3: audio and transcript seeking
 
 `get_meeting_playback_audio` resolves the saved mixed audio for a meeting.

@@ -8,6 +8,7 @@ import { Radar, Workflow } from "lucide-react"
 import { toast } from "sonner"
 import { useLabs } from "@/hooks/useLabs"
 import { setLabsFeature } from "@/lib/labs-features"
+import { readMeetingEndPrefs, writeMeetingEndPrefs } from "@/lib/meeting-end"
 
 interface MeetingDetectionSettings {
   enabled: boolean;
@@ -27,6 +28,9 @@ export function MeetingDetectionSettings() {
   const [ignoredInput, setIgnoredInput] = useState('');
   const { labs } = useLabs();
   const [automationBusy, setAutomationBusy] = useState(false);
+  const [endPrefs, setEndPrefs] = useState({ prompt: true, autoStop: false });
+  useEffect(() => setEndPrefs(readMeetingEndPrefs()), []);
+  const saveEndPrefs = (next: { prompt: boolean; autoStop: boolean }) => { setEndPrefs(next); writeMeetingEndPrefs(next); };
 
   useEffect(() => {
     invoke<MeetingDetectionSettings>('get_meeting_detection_settings')
@@ -154,6 +158,35 @@ export function MeetingDetectionSettings() {
           aria-label="Start and stop recordings automatically"
           className="mt-1 shrink-0"
         />
+      </div>
+
+      <div className="rounded-2xl border border-af-border bg-af-panel-2/40 p-5 space-y-4">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-[15px] font-semibold text-af-text mb-2">Notice when a meeting ends</h3>
+            <p className="text-sm text-af-text-2">
+              While recording, ask whether to stop when the meeting app hangs up, when no one has spoken for 3 minutes
+              (1 minute after the calendar end time), or after goodbyes and a short silence near the end. Works for any
+              recording, including calls on a Desk Pro or in a room.
+            </p>
+          </div>
+          <Switch
+            checked={endPrefs.prompt}
+            onCheckedChange={(prompt) => saveEndPrefs({ ...endPrefs, prompt })}
+            aria-label="Notice when a meeting ends"
+            className="mt-1 shrink-0"
+          />
+        </div>
+        <div className="flex items-start justify-between gap-4">
+          <p className="text-sm text-af-text-2">Stop and save automatically if I don&apos;t answer within 1 minute</p>
+          <Switch
+            checked={endPrefs.autoStop}
+            disabled={!endPrefs.prompt}
+            onCheckedChange={(autoStop) => saveEndPrefs({ ...endPrefs, autoStop })}
+            aria-label="Stop and save automatically if I don't answer"
+            className="shrink-0"
+          />
+        </div>
       </div>
     </div>
   );
