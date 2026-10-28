@@ -44,7 +44,7 @@ test('with the setting on, speakers are identified without asking, once', async 
 
 test('ticking the box on the card remembers the choice', async () => {
   await render();
-  const box = root.root.findByProps({ 'aria-label': 'Identify speakers automatically after every recording' });
+  const box = root.root.findByProps({ 'aria-label': 'Transcribe and identify speakers after every recording' });
   await act(async () => box.props.onChange({ target: { checked: true } }));
   expect(values.get('af-post-call-auto-identify')).toBe('1');
 });

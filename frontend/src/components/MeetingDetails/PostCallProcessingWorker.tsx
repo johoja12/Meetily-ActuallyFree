@@ -550,9 +550,9 @@ export function PostCallProcessingWorker({
                 setAutomatic(event.target.checked);
                 writeAutoIdentifySpeakers(event.target.checked);
               }}
-              aria-label="Identify speakers automatically after every recording"
+              aria-label="Transcribe and identify speakers after every recording"
             />
-            Do this automatically after every recording
+            Do this automatically after every recording (transcribe + identify speakers)
           </label>
           <div className={cn('flex items-center gap-2', isNemotron ? 'justify-center' : 'justify-end')}>
             <Button variant="ghost" onClick={() => { void continueWithLiveTranscript(); }}>
