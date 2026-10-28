@@ -138,6 +138,24 @@ notification uses the existing consent, reminder and Do Not Disturb preferences;
 private event titles stay in the in-app prompt. The UI requests `calendar_take_prompts` only after completing setup/disclosure. Calendar events
 never automatically start or stop capture.
 
+**Wait until the meeting starts** (`listen_for_start`, off by default, needs
+reminders on) replaces the timed reminder with a microphone check, for calls no
+app reports, such as one on a paired Desk Pro or room system, where meeting
+detection sees nothing. `calendar/listen.rs` wakes each minute. While an eligible
+meeting is unprompted (from the lead time through 30 minutes after the start,
+never after the end), and nothing is recording and the Settings level meter is
+off, it meters the saved recording microphone (`preferred_mic_device`, else the
+default) for 10 seconds. It computes 50 ms RMS frames and keeps nothing else.
+Two seconds of frames at or above 0.01 RMS (about -40 dBFS) queue a prompt for
+each current meeting (`State::queue_heard`) with `heard: true`. The toast then
+reads "Sounds like your meeting has started", and the notification keeps the
+title private. Each occurrence is prompted once; a recording in progress marks it
+prompted without a prompt. Opening the microphone shows the macOS microphone
+indicator, and Bluetooth headsets may switch to their call profile while it is
+open. Tests cover the window, once-only queueing, settings gates, framing and
+the speech threshold. The threshold is not yet qualified against real rooms or
+speakers. Steady loud noise or music also counts as sound, costing one prompt.
+
 `useCalendar` only reads the native cache, with event invalidation and a 30-second
 fallback. Slow earlier responses cannot overwrite newer data. The root
 CalendarRecordingPrompts survives route navigation; the compact bar does not own

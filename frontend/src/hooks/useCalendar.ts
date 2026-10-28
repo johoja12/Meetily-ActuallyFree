@@ -10,6 +10,8 @@ export interface CalendarSettings {
   prompt_recording: boolean;
   reminder_minutes: number;
   selected_calendar_ids: string[];
+  /** Prompt when the microphone hears the meeting start, not at a set time. */
+  listen_for_start?: boolean;
 }
 export interface CalendarSnapshot {
   supported: boolean;

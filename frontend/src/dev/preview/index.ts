@@ -68,7 +68,7 @@ const state = {
   },
   calendar: {
     supported: true, authorization: 'not_determined', busy: false, error: null, last_updated_ms: null,
-    settings: { enabled: false, suggest_titles: true, prompt_recording: true, reminder_minutes: 5, selected_calendar_ids: [] },
+    settings: { enabled: false, suggest_titles: true, prompt_recording: true, reminder_minutes: 5, selected_calendar_ids: [], listen_for_start: false },
     calendars: [], events: [],
   } as CalendarSnapshot,
   meetingDetection: {
