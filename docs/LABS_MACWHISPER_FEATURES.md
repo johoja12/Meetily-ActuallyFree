@@ -71,7 +71,13 @@ count for their app. A known meeting app counts only while it runs input and
 output at once (`call_app_match`), on any device, a USB headset or a Desk Pro in
 USB mode included. Input alone is not a call: Webex keeps the microphone open
 for proximity pairing. A match is an active-media signal, so Labs automation
-now auto-starts on macOS too. When the query is unavailable the old
+now auto-starts on macOS too. Open audio alone was not enough in practice: Webex opens
+microphone and speakers for its join preview at the meeting's start, and
+automation recorded an empty lobby. A new call is therefore reported only once
+the recording microphone hears speech (`calendar::listen` sampling: 10 s, two
+seconds at or above 0.01 RMS), re-checked each scan until it does; an already
+reported call is not re-checked, and an unreadable microphone falls back to
+reporting the call. When the query is unavailable the old
 process-only check is used. Not detected: a call running on a paired Desk Pro
 or room device, where no call audio reaches the Mac (calendar reminders still
 offer Record), and browser meetings. Covered by unit tests on pure functions; a
