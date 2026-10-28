@@ -407,6 +407,13 @@ fn macos_audio_clients(sys: &sysinfo::System) -> Option<Vec<AudioClient>> {
     Some(clients)
 }
 
+/// Only a call that is not yet reported, with active media, needs to be heard
+/// first. An already reported call (or one replacing another) is not re-checked.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn needs_sound_check(alerted: Option<&(String, String, bool)>, found: &(String, String, bool)) -> bool {
+    found.2 && alerted.is_none()
+}
+
 /// Does a process name match a meeting-app keyword?
 ///
 /// We deliberately do NOT use a raw substring test. Naive `contains("teams")`
@@ -484,6 +491,15 @@ mod tests {
         );
     }
 
+    #[test]
+    fn only_a_new_active_call_waits_to_be_heard() {
+        use super::needs_sound_check;
+        let call = ("Webex".to_string(), "webex".to_string(), true);
+        assert!(needs_sound_check(None, &call));
+        assert!(!needs_sound_check(Some(&call), &call));
+        assert!(!needs_sound_check(None, &("Webex".into(), "webex".into(), false)));
+    }
+
     #[cfg(windows)]
     #[test]
     fn browser_title_requires_meeting_context() {
@@ -516,6 +532,9 @@ fn start_monitor<R: Runtime>(app: &AppHandle<R>) {
         // so we prompt once per meeting rather than every tick.
         let mut alerted: Option<(String, String, bool)> = None;
         let mut missing_since: Option<std::time::Instant> = None;
+        // The app last logged as waiting for speech, so the log says it once.
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut, unused_variables))]
+        let mut waiting_for: Option<String> = None;
 
         // Give the loop a moment before the first heavy scan.
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -541,6 +560,34 @@ fn start_monitor<R: Runtime>(app: &AppHandle<R>) {
                 (Some((_, process, true)), Some((_, candidate, false))) if process == &candidate => None,
                 (_, other) => other,
             };
+            // macOS: an app with microphone and speakers open may only be
+            // showing its join preview (Webex's microphone check and chime).
+            // Report a new call once the recording microphone hears speech;
+            // until then, keep checking each scan.
+            #[cfg(target_os = "macos")]
+            let scan = match scan {
+                Some(found) if needs_sound_check(alerted.as_ref(), &found) && !crate::audio::recording_commands::is_recording_active() => {
+                    use crate::calendar::listen;
+                    let device = listen::preferred_mic(&app);
+                    let heard = tokio::task::spawn_blocking(move || {
+                        listen::sample_frames(device.as_deref(), listen::SAMPLE).map(|frames| listen::heard_speech(&frames))
+                    })
+                    .await;
+                    match heard {
+                        Ok(Ok(false)) => {
+                            if waiting_for.as_deref() != Some(found.1.as_str()) {
+                                log::info!("Meeting app {} has audio open but no speech yet; waiting to report it", found.0);
+                                waiting_for = Some(found.1.clone());
+                            }
+                            None
+                        }
+                        // Heard, or the microphone could not be read: report as before.
+                        _ => Some(found),
+                    }
+                }
+                other => other,
+            };
+            if MONITOR_GENERATION.load(Ordering::SeqCst) != generation { break; }
             match scan {
                 Some((friendly, process, active_media)) => {
                     missing_since = None;

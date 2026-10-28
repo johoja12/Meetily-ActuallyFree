@@ -9,7 +9,7 @@ use std::time::Duration;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use tauri::{AppHandle, Emitter, Runtime};
 
-const SAMPLE: Duration = Duration::from_secs(10);
+pub(crate) const SAMPLE: Duration = Duration::from_secs(10);
 const FRAME_SECS: f32 = 0.05;
 /// About -40 dBFS: quiet speech, or a call on a nearby speaker. Room tone and
 /// a laptop fan sit well below it.
@@ -44,7 +44,7 @@ impl Frames {
 }
 
 /// The saved recording microphone, read without logging; None means default.
-fn preferred_mic<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
+pub(crate) fn preferred_mic<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
     use tauri_plugin_store::StoreExt;
     let preferences = app.store("recording_preferences.json").ok()?.get("preferences")?;
     preferences.get("preferred_mic_device")?.as_str().map(str::to_string)
@@ -68,7 +68,7 @@ where
 }
 
 /// Meter the microphone for `duration` and return per-frame RMS. Blocking.
-fn sample_frames(device_name: Option<&str>, duration: Duration) -> anyhow::Result<Vec<f32>> {
+pub(crate) fn sample_frames(device_name: Option<&str>, duration: Duration) -> anyhow::Result<Vec<f32>> {
     let host = cpal::default_host();
     let named = device_name.and_then(|wanted| {
         host.input_devices().ok()?.find(|device| device.name().is_ok_and(|name| name == wanted))
