@@ -2,6 +2,7 @@
 //! reminders are user prompts, never authority to start or stop capture.
 pub mod attendees;
 pub mod link;
+pub mod listen;
 pub mod saved;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -19,6 +20,9 @@ pub struct CalendarSettings {
     pub prompt_recording: bool,
     pub reminder_minutes: u32,
     pub selected_calendar_ids: Vec<String>,
+    /// Prompt when the microphone hears the meeting start instead of at the
+    /// scheduled time. Off by default: it opens the microphone briefly.
+    pub listen_for_start: bool,
 }
 impl Default for CalendarSettings {
     fn default() -> Self {
@@ -28,6 +32,7 @@ impl Default for CalendarSettings {
             prompt_recording: true,
             reminder_minutes: 5,
             selected_calendar_ids: vec![],
+            listen_for_start: false,
         }
     }
 }
@@ -67,6 +72,22 @@ impl CalendarMeeting {
             && now < self.end_ms
             && now <= self.start_ms + 10 * 60_000
     }
+    /// Listening covers late starts, so it runs longer than a timed reminder.
+    fn listen_due(&self, now: i64, minutes: u32) -> bool {
+        self.valid()
+            && self.is_meeting
+            && now >= self.start_ms - i64::from(minutes.min(15)) * 60_000
+            && now < self.end_ms
+            && now <= self.start_ms + LISTEN_WINDOW_MS
+    }
+}
+const LISTEN_WINDOW_MS: i64 = 30 * 60_000;
+/// One prompt for the UI. `heard` marks a prompt raised by the microphone check.
+#[derive(Serialize)]
+pub struct CalendarPrompt {
+    #[serde(flatten)]
+    event: CalendarMeeting,
+    heard: bool,
 }
 #[derive(Serialize)]
 pub struct CalendarSnapshot {
@@ -104,10 +125,12 @@ struct State {
 impl State {
     fn queue_due_prompts(&mut self, now: i64, recording: bool) -> bool {
         self.prompted.retain(|_, end| *end > now - 3_600_000);
+        let window = if self.settings.listen_for_start { LISTEN_WINDOW_MS } else { 10 * 60_000 };
         self.pending
-            .retain(|event| event.end_ms > now && event.start_ms + 10 * 60_000 >= now);
+            .retain(|event| event.end_ms > now && event.start_ms + window >= now);
         let mut added = false;
-        if self.settings.enabled && self.settings.prompt_recording {
+        // In listening mode the microphone check queues prompts (`queue_heard`).
+        if self.settings.enabled && self.settings.prompt_recording && !self.settings.listen_for_start {
             for event in self
                 .events
                 .iter()
@@ -132,6 +155,30 @@ impl State {
                 .map(|(key, _)| key.clone())
             {
                 self.prompted.remove(&key);
+            }
+        }
+        added
+    }
+    fn listening_events(&self, now: i64) -> impl Iterator<Item = &CalendarMeeting> {
+        let on = self.settings.enabled && self.settings.prompt_recording && self.settings.listen_for_start;
+        self.events.iter().filter(move |event| {
+            on && event.listen_due(now, self.settings.reminder_minutes) && !self.prompted.contains_key(&event.key())
+        })
+    }
+    /// A meeting is on now that has not been prompted yet.
+    fn wants_listening(&self, now: i64) -> bool {
+        self.listening_events(now).next().is_some()
+    }
+    /// The microphone heard speech: prompt every current meeting once. While
+    /// recording they are marked prompted without a prompt, like reminders.
+    fn queue_heard(&mut self, now: i64, recording: bool) -> bool {
+        let heard: Vec<CalendarMeeting> = self.listening_events(now).cloned().collect();
+        let mut added = false;
+        for event in heard {
+            self.prompted.insert(event.key(), event.end_ms);
+            if !recording && self.pending.len() < 20 {
+                self.pending.push(event);
+                added = true;
             }
         }
         added
@@ -243,6 +290,29 @@ impl Drop for QueryGuard {
 
 /// A timed-out EventKit call retains its one native query slot until it really
 /// finishes. Reloading a WebView cannot launch an unbounded set of native reads.
+/// Native scheduling survives hidden/reloaded WebViews. Keep private event
+/// titles off lock-screen notifications; choices stay in-app.
+fn notify_prompt<R: Runtime>(app: &AppHandle<R>, title: &'static str) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Some(managed) =
+            app.try_state::<crate::notifications::commands::NotificationManagerState<R>>()
+        {
+            let manager = managed.read().await;
+            if let Some(manager) = manager.as_ref() {
+                let mut notification =
+                    crate::notifications::types::Notification::meeting_reminder(0, None);
+                notification.title = title.into();
+                notification.body = "Open Meetily to choose whether to record.".into();
+                notification.actions.clear();
+                // Keep the existing notification consent, reminder and
+                // Do Not Disturb preferences authoritative.
+                let _ = manager.show_notification(notification).await;
+            }
+        }
+    });
+}
+
 async fn refresh<R: Runtime>(app: AppHandle<R>, request_access: bool) -> Result<(), String> {
     if QUERY_RUNNING
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -318,26 +388,7 @@ async fn refresh<R: Runtime>(app: AppHandle<R>, request_access: bool) -> Result<
         let superseded = state().lock().unwrap().revision != revision;
         drop(guard);
         if outcome.is_ok() && notify {
-            // Native scheduling survives hidden/reloaded WebViews. Keep private
-            // event titles off lock-screen notifications; choices stay in-app.
-            let notification_app = worker_app.clone();
-            tauri::async_runtime::spawn(async move {
-                if let Some(managed) = notification_app
-                    .try_state::<crate::notifications::commands::NotificationManagerState<R>>(
-                ) {
-                    let manager = managed.read().await;
-                    if let Some(manager) = manager.as_ref() {
-                        let mut notification =
-                            crate::notifications::types::Notification::meeting_reminder(0, None);
-                        notification.title = "Calendar meeting starting".into();
-                        notification.body = "Open Meetily to choose whether to record.".into();
-                        notification.actions.clear();
-                        // Keep the existing notification consent, reminder and
-                        // Do Not Disturb preferences authoritative.
-                        let _ = manager.show_notification(notification).await;
-                    }
-                }
-            });
+            notify_prompt(&worker_app, "Calendar meeting starting");
         }
         if superseded {
             REFRESH_REQUESTED.notify_one();
@@ -370,6 +421,7 @@ async fn refresh<R: Runtime>(app: AppHandle<R>, request_access: bool) -> Result<
 }
 
 pub fn initialize<R: Runtime>(app: &AppHandle<R>) {
+    listen::initialize(app);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         loop {
@@ -443,7 +495,7 @@ pub fn calendar_disconnect<R: Runtime>(app: AppHandle<R>) -> Result<CalendarSnap
     Ok(snapshot())
 }
 #[tauri::command]
-pub fn calendar_take_prompts() -> Vec<CalendarMeeting> {
+pub fn calendar_take_prompts() -> Vec<CalendarPrompt> {
     let mut state = state().lock().unwrap();
     let now = chrono::Utc::now().timestamp_millis();
     let pending = std::mem::take(&mut state.pending);
@@ -453,9 +505,12 @@ pub fn calendar_take_prompts() -> Vec<CalendarMeeting> {
     {
         return vec![];
     }
+    let heard = state.settings.listen_for_start;
+    let minutes = state.settings.reminder_minutes;
     pending
         .into_iter()
-        .filter(|event| event.prompt_due(now, state.settings.reminder_minutes))
+        .filter(|event| if heard { event.listen_due(now, minutes) } else { event.prompt_due(now, minutes) })
+        .map(|event| CalendarPrompt { event, heard })
         .collect()
 }
 
@@ -562,6 +617,39 @@ mod tests {
         });
         assert!(state.queue_due_prompts(1_000_004, false));
         assert_eq!(state.pending.len(), 1);
+    }
+    #[test]
+    fn listening_waits_for_sound_then_prompts_once_within_thirty_minutes() {
+        let mut state = State::default();
+        state.settings.enabled = true;
+        state.settings.listen_for_start = true;
+        state.events = vec![event()];
+        // Time alone never prompts in this mode; it asks for listening instead.
+        assert!(!state.queue_due_prompts(1_000_000, false));
+        assert!(state.pending.is_empty());
+        assert!(!state.wants_listening(699_999));
+        assert!(state.wants_listening(1_000_000));
+        // A meeting that starts late is still heard after the 10-minute reminder window.
+        assert!(state.queue_heard(2_200_000, false));
+        assert_eq!(state.pending.len(), 1);
+        state.queue_due_prompts(2_300_000, false);
+        assert_eq!(state.pending.len(), 1, "a heard prompt outlives the reminder window");
+        assert!(!state.wants_listening(2_200_001));
+        assert!(!state.queue_heard(2_200_002, false));
+        // Past 30 minutes, or while recording, nothing is queued.
+        let mut late = State { settings: state.settings.clone(), events: vec![event()], ..State::default() };
+        assert!(!late.wants_listening(2_800_001));
+        assert!(!late.queue_heard(2_800_001, false));
+        assert!(!late.queue_heard(1_000_000, true));
+        assert!(late.pending.is_empty());
+        // Reminders off, or listening off: no listening.
+        let mut off = State { settings: state.settings.clone(), events: vec![event()], ..State::default() };
+        off.settings.prompt_recording = false;
+        assert!(!off.wants_listening(1_500_000));
+        off.settings.prompt_recording = true;
+        off.settings.listen_for_start = false;
+        assert!(!off.wants_listening(1_500_000));
+        assert!(!off.queue_heard(1_500_000, false));
     }
     #[test]
     fn calendar_pending_and_history_are_bounded() {

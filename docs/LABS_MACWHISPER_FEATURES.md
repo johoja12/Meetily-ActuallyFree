@@ -61,7 +61,22 @@ The plan's proposal to bind the detected PID directly to per-app capture is not
 used. Browser PIDs can contain unrelated tabs, and process capture settings are
 independently selected by the user. The detector does not yet meter WASAPI
 sessions or distinguish a muted live call from an idle app with an open media
-lease. macOS and Linux have no active-media automation signal here. A detection
+lease. Linux has no active-media automation signal here.
+
+On macOS (14 and later), detection no longer treats an open app as a meeting:
+Webex, Teams and Slack stay open for chat all day. `macos_audio_clients` reads
+CoreAudio's client process list (`kAudioHardwarePropertyProcessObjectList`, no
+extra permission) and names each process by its outermost `.app`, so helpers
+count for their app. A known meeting app counts only while it runs input and
+output at once (`call_app_match`), on any device, a USB headset or a Desk Pro in
+USB mode included. Input alone is not a call: Webex keeps the microphone open
+for proximity pairing. A match is an active-media signal, so Labs automation
+now auto-starts on macOS too. When the query is unavailable the old
+process-only check is used. Not detected: a call running on a paired Desk Pro
+or room device, where no call audio reaches the Mac (calendar reminders still
+offer Record), and browser meetings. Covered by unit tests on pure functions; a
+live probe on macOS 27 confirmed the query works and showed idle Webex holding
+input without output. A detection
 event is not proof a meeting is underway; users should test the Labs action
 against their conferencing apps before relying on it.
 

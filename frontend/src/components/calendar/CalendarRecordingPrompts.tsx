@@ -16,10 +16,10 @@ export function CalendarRecordingPrompts({ enabled, onStart }: { enabled: boolea
     let stop: (() => void) | undefined;
     const drain = async () => {
       try {
-        const prompts = await invoke<CalendarMeeting[]>('calendar_take_prompts');
+        const prompts = await invoke<Array<CalendarMeeting & { heard?: boolean }>>('calendar_take_prompts');
         if (disposed) return;
         for (const event of prompts) {
-          toast('Record your scheduled meeting?', {
+          toast(event.heard ? 'Sounds like your meeting has started' : 'Record your scheduled meeting?', {
             id: `calendar:${event.id}:${event.start_ms}`,
             description: `${event.title} · ${calendarTime(event)}`,
             duration: 60_000,
