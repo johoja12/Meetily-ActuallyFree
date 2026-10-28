@@ -202,8 +202,13 @@ Tests: `voice_learning::tests::your_voice_*` and `renaming_you_away_*`
 (in-memory apply, undo, rejection, "This is me" learning),
 `voice_profiles::candidate_tests::your_candidates_*` (mic audio counts, call
 audio does not), reconcile and sync hold-back cases, and the frontend
-`contact-voices` and `contact-voice-panel` tests. No real-audio test covers
-learning or matching your voice.
+`contact-voices` and `contact-voice-panel` tests. The ignored
+`voice_profiles::tests::real_audio_your_voice_names_you_and_not_someone_else`
+learns your voice from one local recording (`MEETILY_SELF_VOICE_LEARN`) and
+checks the thresholds name you in another (`MEETILY_SELF_VOICE_PROBE`) and not
+someone else (`MEETILY_SELF_VOICE_OTHER`), using the installed WeSpeaker models
+and fixed 6-second turns. It does not exercise transcript turn selection, and
+its fixtures are private recordings that are never committed.
 
 Live manual names now create person links when the meeting is saved. For older
 meetings whose transcript has a name but lacks that link, enrollment repairs the
