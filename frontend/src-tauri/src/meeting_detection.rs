@@ -175,6 +175,14 @@ fn scan_for_meeting_app(settings: &MeetingDetectionSettings) -> Option<(String, 
         ignored.iter().any(|ig| name.contains(ig))
     };
 
+    // macOS: an app that is merely open is not a meeting (Webex, Teams and
+    // Slack are chat apps too). Only an app running microphone and speakers
+    // counts, and that is an active-media signal for meeting automation.
+    #[cfg(target_os = "macos")]
+    if let Some(clients) = macos_audio_clients(&sys) {
+        return call_app_match(&clients, &settings.meeting_apps, &ignored).map(|(friendly, app)| (friendly, app, true));
+    }
+
     #[cfg(windows)]
     let media_in_use: std::collections::HashSet<String> = windows_media_in_use_exes()
         .into_iter()
@@ -331,6 +339,74 @@ fn browser_title_is_meeting(title: &str) -> bool {
         .iter().any(|needle| title.contains(needle))
 }
 
+/// One CoreAudio client process, named by the app it belongs to.
+#[derive(Clone, Debug)]
+struct AudioClient {
+    app: String,
+    input: bool,
+    output: bool,
+}
+
+/// Lowercased name of the outermost `.app` bundle containing `exe`, so helper
+/// processes (`Webex.app/…/Spark Helper.app/…`) count for their app. Falls back
+/// to the process name for executables outside a bundle.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn audio_client_app(exe: Option<&std::path::Path>, process_name: &str) -> String {
+    exe.and_then(|path| {
+        path.components()
+            .filter_map(|part| part.as_os_str().to_str())
+            .find_map(|part| part.strip_suffix(".app"))
+            .map(str::to_lowercase)
+    })
+    .unwrap_or_else(|| process_name.to_lowercase())
+}
+
+/// The first known meeting app that is both capturing input and playing output,
+/// as `(friendly name, app name)`. Apps that only stay open (Webex, Teams and
+/// Slack chat), only play a sound, or only listen (Webex proximity pairing) are
+/// not calls. Input and output may come from different helper processes.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn call_app_match(clients: &[AudioClient], keywords: &[String], ignored: &[String]) -> Option<(String, String)> {
+    let mut apps: Vec<&str> = clients.iter().map(|client| client.app.as_str()).collect();
+    apps.dedup();
+    apps.into_iter().find_map(|app| {
+        let in_call = clients.iter().any(|c| c.app == app && c.input) && clients.iter().any(|c| c.app == app && c.output);
+        let skipped = app.is_empty() || is_self_process(app) || ignored.iter().any(|ig| !ig.trim().is_empty() && app.contains(&ig.trim().to_lowercase()));
+        if !in_call || skipped {
+            return None;
+        }
+        keywords
+            .iter()
+            .map(|keyword| keyword.trim().to_lowercase())
+            .find(|keyword| !keyword.is_empty() && process_matches_keyword(app, keyword))
+            .map(|keyword| (friendly_name(&keyword), app.to_string()))
+    })
+}
+
+/// macOS: every process CoreAudio has as a client, with whether it is running
+/// input and output (any device, so a USB headset or Desk Pro counts). None when
+/// the query is unavailable, which keeps process-only detection.
+#[cfg(target_os = "macos")]
+fn macos_audio_clients(sys: &sysinfo::System) -> Option<Vec<AudioClient>> {
+    use cidre::core_audio as ca;
+    let processes = ca::System::processes().ok()?;
+    let mut clients: Vec<AudioClient> = processes
+        .iter()
+        .filter_map(|process| {
+            let pid = process.pid().ok()?;
+            let info = sys.process(sysinfo::Pid::from_u32(u32::try_from(pid).ok()?));
+            let name = info.map(|p| p.name().to_string_lossy().to_string()).unwrap_or_default();
+            Some(AudioClient {
+                app: audio_client_app(info.and_then(|p| p.exe()), &name),
+                input: process.is_running_input().unwrap_or(false),
+                output: process.is_running_output().unwrap_or(false),
+            })
+        })
+        .collect();
+    clients.sort_by(|a, b| a.app.cmp(&b.app));
+    Some(clients)
+}
+
 /// Does a process name match a meeting-app keyword?
 ///
 /// We deliberately do NOT use a raw substring test. Naive `contains("teams")`
@@ -374,6 +450,38 @@ mod tests {
         assert!(!process_matches_keyword("steamservice.exe", "teams"));
         assert!(!process_matches_keyword("steam.exe", "teams"));
         assert!(!process_matches_keyword("steamwebhelper.exe", "teams"));
+    }
+
+    #[test]
+    fn audio_clients_are_named_by_their_outermost_app() {
+        use super::audio_client_app;
+        let helper = std::path::Path::new("/Applications/Webex.app/Contents/Frameworks/Spark Helper.app/Contents/MacOS/Spark Helper");
+        assert_eq!(audio_client_app(Some(helper), "Spark Helper"), "webex");
+        assert_eq!(audio_client_app(Some(std::path::Path::new("/Applications/zoom.us.app/Contents/MacOS/zoom.us")), "zoom.us"), "zoom.us");
+        assert_eq!(audio_client_app(Some(std::path::Path::new("/usr/libexec/avconferenced")), "avconferenced"), "avconferenced");
+        assert_eq!(audio_client_app(None, "Slack"), "slack");
+    }
+
+    #[test]
+    fn an_open_app_is_not_a_call_until_it_uses_the_microphone_and_speakers() {
+        use super::{call_app_match, default_meeting_apps, AudioClient};
+        let keywords = default_meeting_apps();
+        let client = |app: &str, input: bool, output: bool| AudioClient { app: app.into(), input, output };
+        // Webex open for chat (or only playing a message sound): no call.
+        assert_eq!(call_app_match(&[client("webex", false, true)], &keywords, &[]), None);
+        // Listening only, as Webex proximity pairing does: no call.
+        assert_eq!(call_app_match(&[client("webex", true, false)], &keywords, &[]), None);
+        // Microphone in one helper and speakers in another still count for the app.
+        let call = [client("webex", true, false), client("webex", false, true)];
+        assert_eq!(call_app_match(&call, &keywords, &[]), Some(("Webex".into(), "webex".into())));
+        // An unknown app or Meetily itself using the microphone is not a meeting app.
+        assert_eq!(call_app_match(&[client("garageband", true, true), client("meetily", true, true)], &keywords, &[]), None);
+        // Ignored apps stay ignored.
+        assert_eq!(call_app_match(&[client("microsoft teams", true, true)], &keywords, &["teams".into()]), None);
+        assert_eq!(
+            call_app_match(&[client("microsoft teams", true, true)], &keywords, &[]),
+            Some(("Microsoft Teams".into(), "microsoft teams".into()))
+        );
     }
 
     #[cfg(windows)]
