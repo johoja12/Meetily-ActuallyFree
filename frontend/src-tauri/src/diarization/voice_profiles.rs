@@ -1110,6 +1110,36 @@ mod candidate_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Real audio for "Your voice": learn from one microphone recording, then
+    /// check it names you in another and does not name someone else. Fixtures
+    /// are local recordings of mostly continuous speech, cut into 6-second
+    /// turns, and are never committed: MEETILY_SELF_VOICE_LEARN and
+    /// MEETILY_SELF_VOICE_PROBE (you, two different meetings) and
+    /// MEETILY_SELF_VOICE_OTHER (somebody else). Uses the installed WeSpeaker
+    /// models. It checks the thresholds, not transcript turn selection.
+    #[test]
+    #[ignore = "Requires diarization models and local voice recordings"]
+    fn real_audio_your_voice_names_you_and_not_someone_else() {
+        let fixture = |name: &str| PathBuf::from(std::env::var(name).unwrap_or_else(|_| panic!("Set {name}")));
+        let turns = |track: &Path| {
+            let seconds = crate::audio::decoder::decode_audio_file(track).unwrap().to_whisper_format().len() as f64 / 16_000.0;
+            (0..(seconds / 6.0) as usize).map(|index| (index as f64 * 6.0, index as f64 * 6.0 + 6.0)).collect::<Vec<_>>()
+        };
+        let learn = fixture("MEETILY_SELF_VOICE_LEARN");
+        let vectors = embed_turns(&learn, &spread(&turns(&learn), LEARN_TURNS)).unwrap();
+        let profile = build_profile(SELF_ID.into(), SELF_LABEL.into(), vec![share_of("learn", &vectors)]).unwrap();
+        let matches = |name: &str| {
+            let track = fixture(name);
+            let means = embed_label_means(&track, &HashMap::from([(SELF_LABEL.to_string(), turns(&track))])).unwrap();
+            let mean = &means[SELF_LABEL];
+            let score = similarity(mean, &profile.embedding).unwrap();
+            println!("{name}: cosine {score:.3} (threshold {MATCH_THRESHOLD})");
+            best_match_scored(mean, std::slice::from_ref(&profile)).is_some()
+        };
+        assert!(matches("MEETILY_SELF_VOICE_PROBE"), "your other recording should match your voice");
+        assert!(!matches("MEETILY_SELF_VOICE_OTHER"), "someone else should not match your voice");
+    }
     #[test]
     fn matching_requires_margin_and_correct_dimension() {
         let mut vector = vec![0.0; 128]; vector[0] = 1.0;

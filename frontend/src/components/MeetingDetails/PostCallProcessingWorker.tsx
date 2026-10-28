@@ -231,6 +231,9 @@ export function PostCallProcessingWorker({
   // the recording could have the engine. It starts over when the recording ends.
   const pausedForRecording = useRef(false);
   const resumeAuto = useRef(false);
+  // Started by the setting rather than a click: nobody is watching the card,
+  // so the result also goes out as a system notification.
+  const unattended = useRef(false);
 
   const checkCancelled = () => {
     if (cancellation.current.signal.aborted) throw new Error('Post-call processing cancelled.');
@@ -249,14 +252,19 @@ export function PostCallProcessingWorker({
     setStage('prompt');
   }, [enabled, meetingId, onComplete, storageKey]);
 
+  const notify = (title: string, body: string) => {
+    if (!unattended.current) return;
+    invoke('show_simple_notification', { title, body }).catch(() => {});
+  };
+
   const completeWorkflow = () => {
     sessionStorage.setItem(storageKey, 'completed');
     setStage('idle');
-    toast.success('Post-call processing complete', {
-      description: skippedEnhancementRef.current
-        ? 'Speaker labels refreshed from the saved transcript.'
-        : 'Transcript enhanced and speaker labels refreshed.',
-    });
+    const description = skippedEnhancementRef.current
+      ? 'Speaker labels refreshed from the saved transcript.'
+      : 'Transcript enhanced and speaker labels refreshed.';
+    toast.success('Post-call processing complete', { description });
+    notify('Transcript and speakers ready', description);
     onComplete();
   };
 
@@ -332,9 +340,11 @@ export function PostCallProcessingWorker({
     return count;
   };
 
-  /** `auto`: detect the number of speakers, as "Auto-detect & continue" does. */
-  const start = async (auto = false) => {
+  /** `auto`: detect the number of speakers, as "Auto-detect & continue" does.
+   * `fromSetting`: started by the automatic setting, not a click. */
+  const start = async (auto = false, fromSetting = false) => {
     if (running.current) return;
+    unattended.current = fromSetting;
     const count = auto ? null : getSelectedSpeakerCount();
     resumeAuto.current = auto || count === null;
     if (count === undefined) return;
@@ -366,7 +376,10 @@ export function PostCallProcessingWorker({
       setFailedStage(activeStageRef.current);
       setError(nextError);
       setStage('error');
-      if (!cancellation.current.signal.aborted) toast.error('Post-call processing failed', { description: nextError });
+      if (!cancellation.current.signal.aborted) {
+        toast.error('Post-call processing failed', { description: nextError });
+        notify('Post-call processing failed', nextError);
+      }
     } finally {
       running.current = false;
       setCancelling(false);
@@ -390,19 +403,21 @@ export function PostCallProcessingWorker({
     void listen('recording-stopped', () => {
       stop?.();
       // Let the new recording's own save and checks go first.
-      setTimeout(() => { if (!disposed) void start(resumeAuto.current); }, 5000);
+      setTimeout(() => { if (!disposed) void start(resumeAuto.current, unattended.current); }, 5000);
     }).then((unlisten) => (disposed ? unlisten() : (stop = unlisten)));
     return () => { disposed = true; stop?.(); };
   });
 
-  // "Identify speakers automatically": run once per meeting as soon as the
-  // engine is known, instead of waiting at the prompt. A failure stops at the
-  // error card, which offers Retry; it never retries on its own.
+  // The automatic setting: run once per meeting instead of waiting at the
+  // prompt. It always auto-detects the speaker count, so it does not wait for
+  // the engine status, which only picks the manual controls; a status that
+  // failed to load must not stop the run. A failure stops at the error card,
+  // which offers Retry; it never retries on its own.
   useEffect(() => {
-    if (!automatic || stage !== 'prompt' || !engine || engineError) return;
+    if (!automatic || stage !== 'prompt') return;
     if (autoStartedRef.current === meetingId) return;
     autoStartedRef.current = meetingId;
-    void start(true);
+    void start(true, true);
   });
 
   const continueWithLiveTranscript = async () => {
