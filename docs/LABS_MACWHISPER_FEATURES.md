@@ -87,9 +87,16 @@ The asset protocol streams it to an HTML audio element, while a worker streams
 8 kHz mono PCM through FFmpeg to compute one approximate peak per second.
 One worker owns waveform extraction at a time; additional requests report busy.
 The UI tracks recording-relative seconds, seeks from a transcript turn
-timestamp or the waveform, highlights the active turn, and supports 0.5–2× playback. The
-virtualized transcript keeps turns separate while seeking, since merging them
-would erase individual seek positions.
+timestamp or the waveform, highlights the active turn, and supports 0.5–2× playback.
+A turn merges a speaker's consecutive segments but keeps each one as a part
+(`Turn.parts`): clicking a part's text seeks to that segment (a text selection
+never seeks), the part playing now is highlighted, and Follow scrolls part by
+part so a long turn keeps the spoken line in view. Saved transcripts load in
+pages of 100, so playback or a seek past the loaded part loads the next page,
+repeating until it is covered (`needsMoreForPlayback` in
+`lib/transcript-playback.ts`); before this, highlight and follow stopped after
+the first page. `tests/lib/transcript-playback.test.ts` covers the active-span
+search and the load trigger; the scrolling itself is not covered by tests.
 
 The roadmap's `TokenData` claim does not apply to the current persisted data:
 transcript turns have start/end seconds, but no verified per-word timings.
