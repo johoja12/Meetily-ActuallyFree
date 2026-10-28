@@ -28,6 +28,7 @@ import { TranscriptSegmentData } from '@/types';
 import { Spinner } from '@/components/ui/spinner';
 import { cn } from '@/lib/utils';
 import { cleanTranscriptText } from '@/lib/labs';
+import { activeIndex as activeSpanIndex, needsMoreForPlayback } from '@/lib/transcript-playback';
 import { displaySpeaker, isUserSpeaker, speakerColor, speakerColorIndexMap, speakerColorValue, speakerDot, speakerKey } from '@/utils/speakerUtils';
 
 /**
@@ -82,6 +83,8 @@ const VIRTUALIZATION_THRESHOLD = 10;
 
 interface Turn extends TranscriptSegmentData {
   memberIds: string[];
+  /** The merged segments, each keeping its own time for seeking and highlight. */
+  parts: Array<{ id: string; timestamp: number; endTime?: number; text: string }>;
 }
 
 function clock(seconds: number | undefined): string {
@@ -115,33 +118,17 @@ function mergeTurns(segments: TranscriptSegmentData[], maxGapSecs = 2.5): Turn[]
       last.text = `${last.text.trim()} ${segment.text.trim()}`.replace(/\s+/g, ' ').trim();
       last.endTime = segment.endTime ?? segment.timestamp;
       last.memberIds.push(segment.id);
+      last.parts.push({ id: segment.id, timestamp: segment.timestamp, endTime: segment.endTime, text: segment.text });
       if (segment.confidence != null) last.confidence = Math.min(last.confidence ?? 1, segment.confidence);
     } else {
-      out.push({ ...segment, memberIds: [segment.id] });
+      out.push({
+        ...segment,
+        memberIds: [segment.id],
+        parts: [{ id: segment.id, timestamp: segment.timestamp, endTime: segment.endTime, text: segment.text }],
+      });
     }
   }
   return out;
-}
-
-function activeTurnIndex(turns: Turn[], time: number | null | undefined): number {
-  if (time == null || turns.length === 0) return -1;
-  let lo = 0;
-  let hi = turns.length - 1;
-  let found = -1;
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    if (turns[mid].timestamp <= time + 0.05) {
-      found = mid;
-      lo = mid + 1;
-    } else {
-      hi = mid - 1;
-    }
-  }
-  if (found === -1) return -1;
-  const turn = turns[found];
-  const end = turn.endTime ?? turn.timestamp;
-  // Between turns, keep the last one lit until the next starts.
-  return time <= end + 4 || found === turns.length - 1 || turns[found + 1].timestamp > time ? found : -1;
 }
 
 const TurnRow = memo(function TurnRow({
@@ -152,6 +139,7 @@ const TurnRow = memo(function TurnRow({
   isStreaming,
   userName,
   active,
+  activePart,
   flash,
   onSpeakerClick,
   onRenameSpeaker,
@@ -166,6 +154,8 @@ const TurnRow = memo(function TurnRow({
   isStreaming: boolean;
   userName: string;
   active: boolean;
+  /** Index into `turn.parts` playing now, or -1. */
+  activePart: number;
   flash: boolean;
   onSpeakerClick?: VirtualizedTranscriptViewProps['onSpeakerClick'];
   onRenameSpeaker?: VirtualizedTranscriptViewProps['onRenameSpeaker'];
@@ -177,6 +167,8 @@ const TurnRow = memo(function TurnRow({
   const label = speaker ? displaySpeaker(speaker, userName) : '';
   const shown = shownText(text, textMode) || (text.trim() === '' ? '[Silence]' : text);
   const clickable = !!speaker && (!!onSpeakerClick || !!onRenameSpeaker);
+  const partTexts = turn.parts.map((part) => shownText(part.text, textMode));
+  const seekableParts = !!onSeek && !isStreaming && partTexts.some(Boolean);
 
   return (
     <div id={`segment-${turn.id}`} className={cn('flex pb-3', isYou ? 'justify-end pl-8' : 'justify-start pr-8')}>
@@ -236,7 +228,32 @@ const TurnRow = memo(function TurnRow({
           )}
           style={isYou ? undefined : ({ '--chip': speakerColorValue(speaker, colorIndex) } as React.CSSProperties)}
         >
-          <p className={cn('text-sm leading-relaxed text-af-text', isStreaming && 'opacity-80')}>{shown}</p>
+          {seekableParts ? (
+            // Each part seeks to its own time; selecting text never seeks.
+            <p className="text-sm leading-relaxed text-af-text">
+              {turn.parts.map((part, index) => partTexts[index] && (
+                <span
+                  key={part.id}
+                  id={`part-${part.id}`}
+                  role="button"
+                  tabIndex={-1}
+                  title={`Play from ${clock(part.timestamp)}`}
+                  onClick={() => {
+                    if (window.getSelection()?.toString()) return;
+                    onSeek?.(part.timestamp);
+                  }}
+                  className={cn(
+                    'cursor-pointer rounded-sm transition-colors hover:bg-af-hover',
+                    index === activePart && 'bg-af-accent/20',
+                  )}
+                >
+                  {partTexts[index]}{' '}
+                </span>
+              ))}
+            </p>
+          ) : (
+            <p className={cn('text-sm leading-relaxed text-af-text', isStreaming && 'opacity-80')}>{shown}</p>
+          )}
         </div>
       </div>
     </div>
@@ -305,7 +322,9 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
 
   const { streamingSegmentId, getDisplayText } = useTranscriptStreaming(turns, isRecording, enableStreaming);
   const useVirtualization = turns.length >= VIRTUALIZATION_THRESHOLD;
-  const activeIndex = useMemo(() => activeTurnIndex(turns, playbackTime), [turns, playbackTime]);
+  const activeIndex = useMemo(() => activeSpanIndex(turns, playbackTime), [turns, playbackTime]);
+  const activePart = activeIndex < 0 ? -1 : activeSpanIndex(turns[activeIndex].parts, playbackTime);
+  const activePartId = activePart < 0 ? null : turns[activeIndex].parts[activePart].id;
   const flashIndex = useMemo(
     () => (highlightSegmentId ? turns.findIndex((turn) => turn.memberIds.includes(highlightSegmentId)) : -1),
     [turns, highlightSegmentId],
@@ -320,14 +339,23 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
     }
   };
 
-  // Follow playback.
-  const lastFollowed = useRef(-1);
+  // Follow playback, part by part so a long turn keeps the spoken line in view.
+  const lastFollowed = useRef<string | null>(null);
   useEffect(() => {
-    if (!followPlayback || activeIndex < 0 || activeIndex === lastFollowed.current) return;
-    lastFollowed.current = activeIndex;
-    scrollToTurn(activeIndex);
+    if (!followPlayback || !activePartId || activePartId === lastFollowed.current) return;
+    lastFollowed.current = activePartId;
+    const part = document.getElementById(`part-${activePartId}`);
+    if (part && scrollRef.current?.contains(part)) part.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    else scrollToTurn(activeIndex);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [followPlayback, activeIndex]);
+  }, [followPlayback, activePartId]);
+
+  // Playback or a seek past the loaded pages loads the next one (repeating
+  // as each arrives), so late audio still lights and follows its line.
+  const playbackNeedsMore = needsMoreForPlayback(turns, playbackTime, hasMore);
+  useEffect(() => {
+    if (playbackNeedsMore && onLoadMore && !isLoadingMore && !isRecording) onLoadMore();
+  }, [playbackNeedsMore, onLoadMore, isLoadingMore, isRecording, turns.length]);
 
   // Deep link: bring the matching turn into view once it is loaded.
   const flashedFor = useRef<string | null>(null);
@@ -380,6 +408,7 @@ export const VirtualizedTranscriptView: React.FC<VirtualizedTranscriptViewProps>
       isStreaming={streamingSegmentId === turn.id}
       userName={userName}
       active={index === activeIndex}
+      activePart={index === activeIndex ? activePart : -1}
       flash={index === flashIndex}
       onSpeakerClick={onSpeakerClick}
       onRenameSpeaker={onRenameSpeaker}

@@ -87,9 +87,16 @@ The asset protocol streams it to an HTML audio element, while a worker streams
 8 kHz mono PCM through FFmpeg to compute one approximate peak per second.
 One worker owns waveform extraction at a time; additional requests report busy.
 The UI tracks recording-relative seconds, seeks from a transcript turn
-timestamp or the waveform, highlights the active turn, and supports 0.5–2× playback. The
-virtualized transcript keeps turns separate while seeking, since merging them
-would erase individual seek positions.
+timestamp or the waveform, highlights the active turn, and supports 0.5–2× playback.
+A turn merges a speaker's consecutive segments but keeps each one as a part
+(`Turn.parts`): clicking a part's text seeks to that segment (a text selection
+never seeks), the part playing now is highlighted, and Follow scrolls part by
+part so a long turn keeps the spoken line in view. Saved transcripts load in
+pages of 100, so playback or a seek past the loaded part loads the next page,
+repeating until it is covered (`needsMoreForPlayback` in
+`lib/transcript-playback.ts`); before this, highlight and follow stopped after
+the first page. `tests/lib/transcript-playback.test.ts` covers the active-span
+search and the load trigger; the scrolling itself is not covered by tests.
 
 The roadmap's `TokenData` claim does not apply to the current persisted data:
 transcript turns have start/end seconds, but no verified per-word timings.
@@ -217,8 +224,13 @@ Tests: `voice_learning::tests::your_voice_*` and `renaming_you_away_*`
 (in-memory apply, undo, rejection, "This is me" learning),
 `voice_profiles::candidate_tests::your_candidates_*` (mic audio counts, call
 audio does not), reconcile and sync hold-back cases, and the frontend
-`contact-voices` and `contact-voice-panel` tests. No real-audio test covers
-learning or matching your voice.
+`contact-voices` and `contact-voice-panel` tests. The ignored
+`voice_profiles::tests::real_audio_your_voice_names_you_and_not_someone_else`
+learns your voice from one local recording (`MEETILY_SELF_VOICE_LEARN`) and
+checks the thresholds name you in another (`MEETILY_SELF_VOICE_PROBE`) and not
+someone else (`MEETILY_SELF_VOICE_OTHER`), using the installed WeSpeaker models
+and fixed 6-second turns. It does not exercise transcript turn selection, and
+its fixtures are private recordings that are never committed.
 
 Live manual names now create person links when the meeting is saved. For older
 meetings whose transcript has a name but lacks that link, enrollment repairs the

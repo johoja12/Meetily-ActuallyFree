@@ -237,7 +237,11 @@ recording" (Settings > Transcription > Speaker Identification, or the card's
 checkbox; `lib/post-call-preferences.ts`, per computer) makes the worker run once
 per meeting as if Auto-detect & continue were clicked: the post-call transcript
 re-run, then speaker auto-detection; a failure stops at the
-error card. `start_retranscription_command` resolves the meeting's current folder
+error card. It starts without waiting for `diarization_get_status` (that only
+picks the manual controls), and because nobody is watching the card it also
+sends a system notification (`show_simple_notification`) when it finishes or
+fails; runs started by a click only toast. Covered by
+`tests/components/post-call-auto-identify.test.tsx`. `start_retranscription_command` resolves the meeting's current folder
 from the database (`current_meeting_folder`), because library sync can move a
 finished recording while the card waits. A transcript re-run holds the engine
 lifecycle lock until its last segment, so starting a recording uses
