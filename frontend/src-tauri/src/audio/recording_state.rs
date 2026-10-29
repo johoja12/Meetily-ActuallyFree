@@ -671,9 +671,16 @@ mod duration_tests {
 
         let active = state.get_active_recording_duration().expect("duration lost after cleanup");
         let total = state.get_recording_duration().unwrap();
-        assert!((0.055..0.09).contains(&active), "active {active}");
-        assert!((0.095..0.13).contains(&total), "total {total}");
-        assert!((0.035..0.07).contains(&state.get_total_pause_duration()));
+        let paused = state.get_total_pause_duration();
+        // Sleeps only set lower bounds: hosted CI runners oversleep by 100+ ms.
+        let timing = format!("active {active}, total {total}, paused {paused}");
+        assert!(active >= 0.055, "{timing}");
+        assert!(paused >= 0.035, "{timing}");
+        assert!((total - active - paused).abs() < 0.005, "{timing}");
+        // Frozen at stop: the 40 ms after it never count.
+        std::thread::sleep(Duration::from_millis(40));
+        assert_eq!(state.get_recording_duration(), Some(total), "{timing}");
+        assert_eq!(state.get_active_recording_duration(), Some(active), "{timing}");
     }
 
     #[test]
