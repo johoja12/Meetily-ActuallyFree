@@ -565,18 +565,25 @@ fn start_monitor<R: Runtime>(app: &AppHandle<R>) {
             // Report a new call once the recording microphone hears speech;
             // until then, keep checking each scan.
             #[cfg(target_os = "macos")]
+            let scan_was_empty = scan.is_none();
+            #[cfg(target_os = "macos")]
             let scan = match scan {
                 Some(found) if needs_sound_check(alerted.as_ref(), &found) && !crate::audio::recording_commands::is_recording_active() => {
                     use crate::calendar::listen;
                     let device = listen::preferred_mic(&app);
+                    let sampled = device.clone();
                     let heard = tokio::task::spawn_blocking(move || {
-                        listen::sample_frames(device.as_deref(), listen::SAMPLE).map(|frames| listen::heard_speech(&frames))
+                        listen::sample_frames(sampled.as_deref(), listen::SAMPLE).map(|frames| listen::heard_speech(&frames))
                     })
                     .await;
                     match heard {
                         Ok(Ok(false)) => {
                             if waiting_for.as_deref() != Some(found.1.as_str()) {
-                                log::info!("Meeting app {} has audio open but no speech yet; waiting to report it", found.0);
+                                log::info!(
+                                    "Meeting app {} has audio open but no speech yet on {}; waiting to report it",
+                                    found.0,
+                                    device.as_deref().unwrap_or("the default microphone")
+                                );
                                 waiting_for = Some(found.1.clone());
                             }
                             None
@@ -593,6 +600,10 @@ fn start_monitor<R: Runtime>(app: &AppHandle<R>) {
                     missing_since = None;
                     if alerted.as_ref() != Some(&(friendly.clone(), process.clone(), active_media)) {
                         alerted = Some((friendly.clone(), process.clone(), active_media));
+                        #[cfg(target_os = "macos")]
+                        {
+                            waiting_for = None;
+                        }
                         log::info!("🔔 Meeting app detected: {} ({})", friendly, process);
                         let _ = app.emit(
                             "meeting-detected",
@@ -606,6 +617,11 @@ fn start_monitor<R: Runtime>(app: &AppHandle<R>) {
                     }
                 }
                 None => {
+                    // Seen again after an absence, a call is logged again.
+                    #[cfg(target_os = "macos")]
+                    if alerted.is_none() && scan_was_empty {
+                        waiting_for = None;
+                    }
                     if let Some((app_name, process, _)) = &alerted {
                         let since = missing_since.get_or_insert_with(std::time::Instant::now);
                         if since.elapsed() >= std::time::Duration::from_secs(45) {

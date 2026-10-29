@@ -43,11 +43,16 @@ impl Frames {
     }
 }
 
-/// The saved recording microphone, read without logging; None means default.
+/// The saved recording microphone as the OS names it, read without logging;
+/// None means default. Preferences store "Name (input)"; CoreAudio says "Name".
 pub(crate) fn preferred_mic<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
     use tauri_plugin_store::StoreExt;
     let preferences = app.store("recording_preferences.json").ok()?.get("preferences")?;
-    preferences.get("preferred_mic_device")?.as_str().map(str::to_string)
+    preferences.get("preferred_mic_device")?.as_str().map(device_name)
+}
+
+fn device_name(saved: &str) -> String {
+    crate::audio::devices::AudioDevice::from_name(saved).map_or_else(|_| saved.to_string(), |device| device.name)
 }
 
 fn open_stream<T>(device: &cpal::Device, config: &cpal::StreamConfig, frames: Arc<Mutex<Frames>>) -> anyhow::Result<cpal::Stream>
@@ -143,6 +148,12 @@ pub fn initialize<R: Runtime>(app: &AppHandle<R>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_microphone_is_matched_by_its_os_name() {
+        assert_eq!(device_name("Jabra Speak 710 (input)"), "Jabra Speak 710");
+        assert_eq!(device_name("MacBook Pro Microphone"), "MacBook Pro Microphone");
+    }
 
     #[test]
     fn speech_needs_two_seconds_of_loud_frames() {

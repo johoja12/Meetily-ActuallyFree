@@ -77,7 +77,10 @@ automation recorded an empty lobby. A new call is therefore reported only once
 the recording microphone hears speech (`calendar::listen` sampling: 10 s, two
 seconds at or above 0.01 RMS), re-checked each scan until it does; an already
 reported call is not re-checked, and an unreadable microphone falls back to
-reporting the call. When the query is unavailable the old
+reporting the call. The saved microphone ("Name (input)") is matched by its CoreAudio name
+("Name"); before that fix the check silently metered the system default input
+(a Desk Pro camera microphone here) and missed a whole Webex meeting. A saved
+microphone that is not connected still falls back to the default input. When the query is unavailable the old
 process-only check is used. Not detected: a call running on a paired Desk Pro
 or room device, where no call audio reaches the Mac (calendar reminders still
 offer Record), and browser meetings. Covered by unit tests on pure functions; a
