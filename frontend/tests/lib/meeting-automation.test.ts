@@ -15,8 +15,10 @@ Object.assign(globalThis, {
 });
 
 const {
+  CALENDAR_CALL,
   automatedRecording,
   beginAutomatedRecording,
+  isCalendarCall,
   endAutomatedRecording,
   markAutomatedStart,
   takeAutomatedStart,
@@ -53,6 +55,16 @@ describe('meeting automation hand-off', () => {
   test('reads the bare process name that #38 stored', () => {
     store.set('labsAutoRecordingProcess', 'Teams.exe');
     assert.deepEqual(automatedRecording(), { app: 'Teams.exe', process: 'Teams.exe' });
+  });
+
+  test('a heard calendar meeting is told apart from a detected app call', () => {
+    markAutomatedStart(CALENDAR_CALL);
+    const call = takeAutomatedStart();
+    assert.ok(isCalendarCall(call));
+    beginAutomatedRecording(call!);
+    assert.ok(isCalendarCall(automatedRecording()));
+    assert.equal(isCalendarCall(zoom), false);
+    assert.equal(isCalendarCall(null), false);
   });
 
   test('ending with nothing running announces nothing', () => {

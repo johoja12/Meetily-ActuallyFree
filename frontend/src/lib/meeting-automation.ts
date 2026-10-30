@@ -54,6 +54,16 @@ function parse(value: string | null): AutomatedCall | null {
   return null;
 }
 
+/**
+ * A calendar meeting the microphone heard start (calendar "Wait until the
+ * meeting starts"). No app reports its end, so the meeting-end watcher stops it.
+ */
+export const CALENDAR_CALL: AutomatedCall = { app: 'Calendar meeting', process: 'calendar' };
+
+export function isCalendarCall(call: AutomatedCall | null): boolean {
+  return call?.process === CALENDAR_CALL.process;
+}
+
 /** Called right before the recorder is asked to start for a detected call. */
 export function markAutomatedStart(call: AutomatedCall) {
   writeKey(PENDING_KEY, JSON.stringify({ ...call, at: Date.now() }));

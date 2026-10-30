@@ -138,7 +138,8 @@ pub fn initialize<R: Runtime>(app: &AppHandle<R>) {
             let recording = crate::audio::recording_commands::is_recording_active();
             if super::state().lock().unwrap().queue_heard(now, recording) {
                 log::info!("Calendar listening heard a meeting start; prompting");
-                super::notify_prompt(&app, "Your calendar meeting has started");
+                // With meeting automation on, the window starts the recording instead.
+                super::notify_prompt(&app, "Your calendar meeting has started", "Open Meetily to record it, unless meeting automation is recording it.");
                 let _ = app.emit("calendar-changed", ());
             }
         }

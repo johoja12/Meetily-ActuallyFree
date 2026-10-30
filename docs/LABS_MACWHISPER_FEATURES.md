@@ -109,7 +109,9 @@ minutes and forgets the goodbyes. Settings > Meeting detection has the switch
 within 1 minute". Stopping uses the normal stop-and-save path. Prompts live in
 the WebView; a closed window loses only the prompt, never capture. Thresholds
 are not yet qualified against real calls; a muted listener in a long silent
-stretch will be asked.
+stretch will be asked. A recording meeting automation started for a heard
+calendar meeting always counts down and stops (`endAction`); see
+CALENDAR_MEETING_SUGGESTIONS.md.
 
 ## Feature 3: audio and transcript seeking
 

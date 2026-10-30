@@ -70,6 +70,16 @@ export function snooze(state: EndState, now: number): EndState {
   return { ...state, snoozedUntil: now + SNOOZE_MS, goodbyes: [], appEnded: null };
 }
 
+/**
+ * What to do once the meeting seems over. A recording automation started from
+ * the calendar has no app to hang up, so it always counts down and stops,
+ * even with the prompt turned off; Keep recording still wins.
+ */
+export function endAction(prefs: { prompt: boolean; autoStop: boolean }, calendarAutomation: boolean): { show: boolean; autoStop: boolean } {
+  if (calendarAutomation) return { show: true, autoStop: true };
+  return { show: prefs.prompt, autoStop: prefs.prompt && prefs.autoStop };
+}
+
 const PROMPT_KEY = 'af-meeting-end-prompt-off';
 const AUTO_STOP_KEY = 'af-meeting-end-auto-stop';
 export const MEETING_END_PREFS_EVENT = 'af-meeting-end-prefs-changed';

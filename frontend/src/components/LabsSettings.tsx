@@ -41,7 +41,7 @@ const GROUPS: Array<{ title: string; features: Feature[] }> = [
         icon: Workflow,
         title: 'Meeting automation',
         description:
-          'Start recording when meeting detection sees a call using your microphone or camera, and stop and save it when the call ends. Recordings you start yourself are never stopped.',
+          'Start recording when meeting detection sees a call using your microphone or camera, and stop and save it when the call ends. With the calendar\'s "Wait until the meeting starts" on, a meeting the microphone hears start is recorded too and stops when the meeting seems over. Recordings you start yourself are never stopped.',
         where: 'Turns on meeting detection. A notice says when a call starts or ends a recording.',
       },
     ],

@@ -148,7 +148,9 @@ export function MeetingDetectionSettings() {
           </h3>
           <p className="mt-0.5 text-[13px] leading-relaxed text-af-text-3">
             Instead of prompting, record a detected call once it uses your microphone or camera, and stop and save when it
-            ends. Recordings you start yourself are never stopped.
+            ends. With the calendar&apos;s &ldquo;Wait until the meeting starts&rdquo; on, a meeting the microphone hears start
+            is recorded too (calls on a Desk Pro or phone) and stops when the meeting seems over. Recordings you start
+            yourself are never stopped.
           </p>
         </div>
         <Switch

@@ -5,6 +5,8 @@ import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import type { CalendarMeeting } from '@/lib/calendar-meetings';
 import { calendarTime, startCalendarRecording } from './CalendarMeetings';
+import { loadLabsPreferences } from '@/lib/labs';
+import { CALENDAR_CALL, markAutomatedStart } from '@/lib/meeting-automation';
 
 /** Mounted once above navigation. Native code owns scheduling and deduplication. */
 export function CalendarRecordingPrompts({ enabled, onStart }: { enabled: boolean; onStart: () => void }) {
@@ -19,6 +21,16 @@ export function CalendarRecordingPrompts({ enabled, onStart }: { enabled: boolea
         const prompts = await invoke<Array<CalendarMeeting & { heard?: boolean }>>('calendar_take_prompts');
         if (disposed) return;
         for (const event of prompts) {
+          // Meeting automation records a meeting the microphone heard start
+          // (calls on a Desk Pro or phone have no app to detect); the
+          // meeting-end watcher stops it.
+          if (event.heard && loadLabsPreferences().meetingAutomation) {
+            void startCalendarRecording(event, () => {
+              markAutomatedStart(CALENDAR_CALL);
+              start.current();
+            });
+            continue;
+          }
           toast(event.heard ? 'Sounds like your meeting has started' : 'Record your scheduled meeting?', {
             id: `calendar:${event.id}:${event.start_ms}`,
             description: `${event.title} · ${calendarTime(event)}`,
