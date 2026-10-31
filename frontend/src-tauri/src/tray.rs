@@ -399,11 +399,12 @@ fn build_menu<R: Runtime>(
 
     builder
         .item(&PredefinedMenuItem::separator(app)?)
-        .item(&MenuItemBuilder::with_id("quit", "Quit").build(app)?)
+        .item(&MenuItemBuilder::with_id("quit", "Quit Meetily").build(app)?)
         .build()
 }
 
 pub(crate) fn focus_main_window<R: Runtime>(app: &AppHandle<R>) {
+    crate::menu_bar::show_in_dock(app);
     if let Some(window) = app.get_webview_window("main") {
         if let Err(e) = window.unminimize() {
             log::error!("Failed to unminimize main window: {}", e);

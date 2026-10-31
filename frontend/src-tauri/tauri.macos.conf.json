@@ -13,5 +13,22 @@
             "hardenedRuntime": true,
             "minimumSystemVersion": "14.2"
         }
+    },
+    "app": {
+        "windows": [
+            {
+                "title": "Meetily - Actually Free",
+                "url": "/",
+                "width": 1280,
+                "height": 760,
+                "minWidth": 700,
+                "center": true,
+                "resizable": true,
+                "fullscreen": false,
+                "theme": "Dark",
+                "decorations": true,
+                "backgroundThrottling": "disabled"
+            }
+        ]
     }
 }

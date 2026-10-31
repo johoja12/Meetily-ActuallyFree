@@ -66,6 +66,7 @@ pub mod state;
 pub mod summary;
 pub mod sync;
 pub mod logging;
+pub mod menu_bar;
 pub mod tray;
 pub mod utils;
 pub mod whisper_engine;
@@ -509,6 +510,15 @@ pub fn run() {
             if let Err(e) = tray::create_tray(_app.handle()) {
                 log::error!("Failed to create system tray: {}", e);
             }
+            #[cfg(target_os = "macos")]
+            if let Err(e) = menu_bar::install_app_menu(_app.handle()) {
+                log::error!("Failed to install the app menu: {}", e);
+            }
+            menu_bar::refresh_login_item();
+            // The login item starts Meetily with only its menu-bar icon.
+            if menu_bar::launched_for_menu_bar() {
+                menu_bar::hide_to_menu_bar(_app.handle());
+            }
 
             // Initialize notification system with proper defaults
             log::info!("Initializing notification system...");
@@ -639,11 +649,7 @@ pub fn run() {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
                     api.prevent_close();
-                    if let Err(e) = window.hide() {
-                        log::error!("Failed to hide main window on close request: {}", e);
-                    } else {
-                        log::info!("Main window hidden to tray on close request");
-                    }
+                    menu_bar::hide_to_menu_bar(window.app_handle());
                 }
             }
         })
@@ -991,6 +997,8 @@ pub fn run() {
             audio::import::start_import_audio_command,
             audio::import::cancel_import_command,
             audio::import::is_import_in_progress_command,
+            menu_bar::get_menu_bar_login,
+            menu_bar::set_menu_bar_login,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
