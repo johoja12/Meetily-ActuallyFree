@@ -107,6 +107,7 @@ fn close_minibar_locked<R: Runtime>(app: &AppHandle<R>) -> Result<bool, String> 
 }
 
 fn restore_main_window<R: Runtime>(app: &AppHandle<R>) {
+    crate::menu_bar::show_in_dock(app);
     if let Some(main) = app.get_webview_window("main") {
         let _ = main.show();
         let _ = main.unminimize();

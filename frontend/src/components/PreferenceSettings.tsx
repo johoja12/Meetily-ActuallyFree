@@ -9,6 +9,42 @@ import Analytics from "@/lib/analytics"
 import { useConfig, NotificationSettings } from "@/contexts/ConfigContext"
 import { ThemePicker } from "@/components/settings/ThemePicker"
 
+/** macOS: closing and ⌘Q hide to the menu bar; this adds the login item. */
+function MenuBarLoginSetting() {
+  // null: not offered on this platform (or not loaded yet).
+  const [enabled, setEnabled] = useState<boolean | null>(null)
+  const [busy, setBusy] = useState(false)
+  useEffect(() => {
+    invoke<boolean | null>("get_menu_bar_login").then(setEnabled).catch(() => setEnabled(null))
+  }, [])
+  if (enabled === null) return null
+  const change = async (next: boolean) => {
+    setBusy(true)
+    try {
+      await invoke("set_menu_bar_login", { enabled: next })
+      setEnabled(next)
+    } catch (error) {
+      toast.error("Could not change the login item", { description: String(error) })
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="rounded-2xl border border-af-border bg-af-panel-2/40 p-5">
+      <div className="flex items-center justify-between gap-4">
+        <div>
+          <h3 className="text-[15px] font-semibold text-af-text mb-2">Start at login in the menu bar</h3>
+          <p className="text-sm text-af-text-2">
+            Open Meetily hidden when you log in, so meeting detection and automation are ready. Closing the window or
+            pressing ⌘Q keeps Meetily in the menu bar; quit it from the menu-bar icon. Takes effect at your next login.
+          </p>
+        </div>
+        <Switch checked={enabled} disabled={busy} onCheckedChange={(next) => void change(next)} aria-label="Start at login in the menu bar" />
+      </div>
+    </div>
+  )
+}
+
 export function PreferenceSettings() {
   const {
     notificationSettings,
@@ -225,6 +261,8 @@ export function PreferenceSettings() {
           <Switch checked={notificationsEnabledValue} onCheckedChange={setNotificationsEnabled} />
         </div>
       </div>
+
+      <MenuBarLoginSetting />
 
       {/* Data Storage Locations Section */}
       <div className="rounded-2xl border border-af-border bg-af-panel-2/40 p-5">

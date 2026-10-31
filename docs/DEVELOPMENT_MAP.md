@@ -358,6 +358,25 @@ provisioned by `build-nsis-progress-plugin.ps1` with tauri-bundler's pinned URLs
 and SHA-1s, because the bundler recreates an incomplete toolset and would drop the
 progress plugin.
 
+### Menu-bar mode (macOS)
+
+`src-tauri/src/menu_bar.rs` owns window hiding. Closing the main window and ⌘Q
+("Close to Menu Bar", which replaces the predefined Quit item because macOS
+terminates on that item without a preventable event) hide the window and switch
+the activation policy to Accessory, removing the Dock icon. `tray::focus_main_window`
+and the compact bar's restore switch back to Regular before showing the window.
+The WebView stays loaded while hidden, and `tauri.macos.conf.json` sets
+`backgroundThrottling: disabled` (macOS 14+) because meeting automation, calendar
+prompts and the meeting-end watcher run there. Only the menu-bar icon's "Quit
+Meetily" (or the Dock's Quit, logout and shutdown) ends the process.
+"Start at login in the menu bar" (Settings > General) writes
+`~/Library/LaunchAgents/com.meetily.ai.menu-bar.plist`, which runs
+`open -g -a <bundle> --args --menu-bar` at login; the flag starts the app hidden.
+It is rewritten at each launch while enabled, so a moved app keeps working, and
+is not loaded into launchd until the next login. Tests cover the launch
+arguments and plist escaping; activation-policy switching and the login launch
+were not exercised by tests.
+
 ### Logs
 
 `src-tauri/src/logging.rs` (started from `main.rs`) writes every log line to
