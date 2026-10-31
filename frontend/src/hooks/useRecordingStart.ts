@@ -12,7 +12,7 @@ import { useRouter } from 'next/navigation';
 import { automaticTitle, beginLiveSession, readLiveTitle, undoCalendarTitle } from '@/lib/live-session';
 import type { CalendarSnapshot } from '@/hooks/useCalendar';
 import { AUTO_START_KEY, START_RECORDING_EVENT } from '@/lib/recording-launch';
-import { beginAutomatedRecording, endAutomatedRecording, takeAutomatedStart } from '@/lib/meeting-automation';
+import { beginAutomatedRecording, endAutomatedRecording, isCalendarCall, takeAutomatedStart } from '@/lib/meeting-automation';
 import Analytics from '@/lib/analytics';
 import { showRecordingNotification } from '@/lib/recordingNotification';
 import { toast } from 'sonner';
@@ -207,8 +207,11 @@ export function useRecordingStart(
       Analytics.trackButtonClick('start_recording', source);
       if (call) {
         beginAutomatedRecording(call);
-        toast(`Recording your ${call.app} call`, {
-          description: 'Meeting automation started it, and stops and saves it when the call ends.',
+        const calendar = isCalendarCall(call);
+        toast(calendar ? 'Recording your calendar meeting' : `Recording your ${call.app} call`, {
+          description: calendar
+            ? 'Meeting automation heard the meeting start, and stops and saves it when the meeting seems over.'
+            : 'Meeting automation started it, and stops and saves it when the call ends.',
           duration: 10000,
           action: { label: "Don't stop it", onClick: () => endAutomatedRecording() },
         });

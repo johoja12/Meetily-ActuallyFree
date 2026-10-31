@@ -156,6 +156,21 @@ open. Tests cover the window, once-only queueing, settings gates, framing and
 the speech threshold. The threshold is not yet qualified against real rooms or
 speakers. Steady loud noise or music also counts as sound, costing one prompt.
 
+With Labs meeting automation on, `CalendarRecordingPrompts` starts the recording
+for a `heard` prompt instead of showing it (through `startCalendarRecording`, so
+an already running recording or a finished event still wins). It hands off
+`CALENDAR_CALL` (`process: "calendar"`) via `markAutomatedStart` right before
+the start, so a refused start leaves no stale hand-off. No app reports such a
+meeting's end, so `MeetingEndWatcher` stops it: `endAction` always shows the
+prompt with the one-minute countdown for a calendar-automation recording, even
+with the end prompt switched off; "Don't stop it" on the start toast returns it
+to the user's switches. The native notification cannot read Labs settings
+(WebView storage), so its body covers both cases. Room chatter during a
+scheduled slot can therefore start a recording; it stops after 3 minutes of
+quiet (1 minute past the calendar end) plus the countdown. Tested in
+`meeting-automation.test.ts` and `meeting-end.test.ts`; not yet seen on a real
+Desk Pro call.
+
 `useCalendar` only reads the native cache, with event invalidation and a 30-second
 fallback. Slow earlier responses cannot overwrite newer data. The root
 CalendarRecordingPrompts survives route navigation; the compact bar does not own

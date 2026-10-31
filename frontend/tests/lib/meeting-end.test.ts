@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { endReason, freshEndState, isGoodbye, noteGoodbye, noteLevel, type EndState } from '../../src/lib/meeting-end';
+import { endAction, endReason, freshEndState, isGoodbye, noteGoodbye, noteLevel, type EndState } from '../../src/lib/meeting-end';
 
 const MIN = 60_000;
 const T0 = 1_000_000_000;
@@ -82,4 +82,15 @@ test('a gap in level events (pause) restarts the quiet clock', () => {
   assert.equal(endReason(state, T0 + 11 * MIN), null);
   state = withLevels(state, T0 + 11 * MIN, T0 + 14 * MIN, 0);
   assert.equal(endReason(state, T0 + 14 * MIN)?.reason, 'silence');
+});
+
+test('a calendar meeting automation started always counts down to stop; others follow the switches', () => {
+  const off = { prompt: false, autoStop: false };
+  assert.deepEqual(endAction(off, true), { show: true, autoStop: true });
+  assert.deepEqual(endAction({ prompt: true, autoStop: false }, true), { show: true, autoStop: true });
+  assert.deepEqual(endAction(off, false), { show: false, autoStop: false });
+  assert.deepEqual(endAction({ prompt: true, autoStop: false }, false), { show: true, autoStop: false });
+  assert.deepEqual(endAction({ prompt: true, autoStop: true }, false), { show: true, autoStop: true });
+  // Auto-stop without the prompt shown never stops silently.
+  assert.deepEqual(endAction({ prompt: false, autoStop: true }, false), { show: false, autoStop: false });
 });

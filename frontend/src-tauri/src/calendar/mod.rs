@@ -292,7 +292,7 @@ impl Drop for QueryGuard {
 /// finishes. Reloading a WebView cannot launch an unbounded set of native reads.
 /// Native scheduling survives hidden/reloaded WebViews. Keep private event
 /// titles off lock-screen notifications; choices stay in-app.
-fn notify_prompt<R: Runtime>(app: &AppHandle<R>, title: &'static str) {
+fn notify_prompt<R: Runtime>(app: &AppHandle<R>, title: &'static str, body: &'static str) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         if let Some(managed) =
@@ -303,7 +303,7 @@ fn notify_prompt<R: Runtime>(app: &AppHandle<R>, title: &'static str) {
                 let mut notification =
                     crate::notifications::types::Notification::meeting_reminder(0, None);
                 notification.title = title.into();
-                notification.body = "Open Meetily to choose whether to record.".into();
+                notification.body = body.into();
                 notification.actions.clear();
                 // Keep the existing notification consent, reminder and
                 // Do Not Disturb preferences authoritative.
@@ -388,7 +388,7 @@ async fn refresh<R: Runtime>(app: AppHandle<R>, request_access: bool) -> Result<
         let superseded = state().lock().unwrap().revision != revision;
         drop(guard);
         if outcome.is_ok() && notify {
-            notify_prompt(&worker_app, "Calendar meeting starting");
+            notify_prompt(&worker_app, "Calendar meeting starting", "Open Meetily to choose whether to record.");
         }
         if superseded {
             REFRESH_REQUESTED.notify_one();

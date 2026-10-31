@@ -7,8 +7,9 @@ import { toast } from 'sonner';
 import { requestRecordingStop } from '@/lib/recording-launch';
 import { readLiveTitle } from '@/lib/live-session';
 import { loadLabsPreferences } from '@/lib/labs';
-import { automatedRecording } from '@/lib/meeting-automation';
+import { automatedRecording, isCalendarCall } from '@/lib/meeting-automation';
 import {
+  endAction,
   endReason,
   freshEndState,
   isGoodbye,
@@ -101,10 +102,10 @@ export function MeetingEndWatcher({ enabled }: { enabled: boolean }) {
         if (prompt.autoStopAt != null && now >= prompt.autoStopAt) stop();
         return;
       }
-      const prefs = readMeetingEndPrefs();
-      if (!prefs.prompt) return;
+      const action = endAction(readMeetingEndPrefs(), isCalendarCall(automatedRecording()) && loadLabsPreferences().meetingAutomation);
+      if (!action.show) return;
       const reason = endReason(state, now);
-      if (reason) show(reason, prefs.autoStop);
+      if (reason) show(reason, action.autoStop);
     };
 
     unlisteners.push(listen('recording-started', begin));
