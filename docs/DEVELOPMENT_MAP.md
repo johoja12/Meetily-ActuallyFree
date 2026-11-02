@@ -197,10 +197,25 @@ turns still need it. `stop()` releases the session after transcription processin
 has been drained by recording-stop orchestration. Startup failures also clean up
 the live session.
 
-The low-latency profile buffers 1.04 s of audio, emits 0.72 s strides, and uses
-0.32 s lookahead. These model parameters are not an end-to-end UI latency claim:
+The live profile (`LIVE_CHUNK_FRAMES`/`LIVE_RIGHT_CONTEXT_FRAMES` in
+`nemotron.rs`) buffers 2.32 s of audio, emits 2.0 s strides, and uses 0.32 s
+lookahead; `live_nemotron.rs` derives its timeline stride from those constants.
+NVIDIA's 1.04 s preset averaged 0.69x real time alone on an M4 CPU (0.59 in
+steady state) and overflowed the queue ~3.5 min into a room-microphone meeting
+with Parakeet sharing the cores. Each step attends over the full speaker cache
+and FIFO, so the longer chunk costs ~0.25x real time in steady state. ONNX Runtime's CoreML execution provider was tried
+and rejected: MLProgram fails to compile this graph, and NeuralNetwork splits it
+into 320 partitions and fails at inference. A separate fixed-shape CoreML
+conversion of the same model (FluidAudio v0.17.7, `FluidInference/nemotron-3-
+diarization-coreml`, 8 speakers, same inputs/outputs) was evaluated with a
+throwaway Swift harness on the same 360 s clip, not integrated: its 1.04 s preset
+ran at 0.05x real time (0.10 CPU-only) at both idle and load ~30, against 0.57
+idle / 1.08 loaded for ONNX on CPU, and the 2.32 s profile's 0.26 / 0.38. Its
+offline output matched Meetily's ONNX offline output on 99.91% of 10 ms frames,
+and its 1.04 s preset agreed 99.3% (Meetily's: 98.9%). One two-speaker clip; not
+a general accuracy result. These model parameters are not an end-to-end UI latency claim:
 VAD boundaries, ASR time, and queue load also contribute. Timeline lookup waits
-at most 1.5 s; history is limited to ten minutes. Missing/failed results retain
+at most 2.5 s; history is limited to ten minutes. Missing/failed results retain
 source labels rather than guessing a speaker or switching engines.
 
 ### Calendar titles and recording prompts
@@ -543,6 +558,15 @@ prerequisites configured, use `cargo test -p meetily --lib live_nemotron` and th
 appropriate platform feature flags. Windows qualification uses release binaries
 and the packaged shared runtime; local `.build-tools/` scripts are environment-
 specific conveniences, not substitutes for documenting prerequisites/results.
+
+`live_nemotron_live_profile_keeps_up_and_matches_offline` (ignored) asserts the
+production live profile's steady-state real-time factor is below 0.4 and that it
+agrees with the offline profile on >97% of single-speaker frames, printing
+NVIDIA's 1.04 s preset alongside. On an M4, the first 360 s of the two-speaker
+room-microphone meeting whose live labeling had overflowed measured 0.26 / 99.3%
+(preset: 0.57 / 98.9%), and the streaming test found both speakers. A 188 s
+single-voice recording gave 0.20-0.26 / 99.5%; on it the multispeaker test fails
+for both profiles, as it should. Both recordings are private and not in the repo.
 
 Ignored real-model tests require `MEETILY_NEMOTRON_MODEL` and
 `MEETILY_NEMOTRON_WAV` (16 kHz WAV). The identity test optionally reads

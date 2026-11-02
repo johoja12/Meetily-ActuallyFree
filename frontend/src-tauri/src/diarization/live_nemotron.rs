@@ -4,11 +4,15 @@
 use anyhow::{anyhow, Result};
 use std::{collections::VecDeque, sync::{mpsc, Arc, Condvar, Mutex}, thread, time::Duration};
 use tauri::Emitter;
-use super::nemotron::{NemotronDiarizationModel, StreamingSpeakerSegment};
+use super::nemotron::{NemotronDiarizationModel, StreamingSpeakerSegment, LIVE_CHUNK_FRAMES, LIVE_RIGHT_CONTEXT_FRAMES, SAMPLES_PER_FRAME};
 
 const RATE: u64 = 16_000;
-const STRIDE: u64 = 9 * 1280;
-const LOOKAHEAD: u64 = 4 * 1280;
+const STRIDE: u64 = (LIVE_CHUNK_FRAMES * SAMPLES_PER_FRAME) as u64;
+const LOOKAHEAD: u64 = (LIVE_RIGHT_CONTEXT_FRAMES * SAMPLES_PER_FRAME) as u64;
+/// How long a transcript turn waits for its speaker. A turn's end is covered
+/// once capture passes it by up to one stride plus lookahead (2.32 s) and that
+/// step's inference; ASR has usually taken ~1 s of that already.
+const LABEL_WAIT: Duration = Duration::from_millis(2500);
 const HISTORY: u64 = 10 * 60 * RATE;
 
 #[derive(Default)]
@@ -70,7 +74,7 @@ pub fn start<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<()> {
     let notify: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |message| { let _ = app.emit("live-diarization-error", message); });
     let session = spawn_session(model, notify)?;
     *SESSION.lock().map_err(|_| anyhow!("Live Nemotron lock poisoned"))? = Some(session);
-    log::info!("Live Nemotron started: 1.04 s buffering, continuous system audio, 8 speaker channels");
+    log::info!("Live Nemotron started: {:.2} s buffering, continuous system audio, 8 speaker channels", (STRIDE + LOOKAHEAD) as f64 / RATE as f64);
     Ok(())
 }
 
@@ -146,7 +150,7 @@ pub fn label(start_seconds: f64, duration: f64) -> Option<String> {
     let start = (start_seconds.max(0.0) * RATE as f64).round() as u64;
     let end = start.saturating_add((duration * RATE as f64).round() as u64);
     let state = shared.0.lock().ok()?;
-    let (state, _) = shared.1.wait_timeout_while(state, Duration::from_millis(1500), |s| {
+    let (state, _) = shared.1.wait_timeout_while(state, LABEL_WAIT, |s| {
         !s.failed && !s.finished && s.ready_until < end
     }).ok()?;
     state.label(start, end)
@@ -186,6 +190,79 @@ mod tests {
         assert_eq!(state.ready_until, audio.len() as u64);
         assert!(state.label(0, 10 * RATE).is_some());
         assert!(state.label(audio.len() as u64 - 10 * RATE, audio.len() as u64).is_some());
+    }
+    /// Qualification for the live profile: steady-state (second-half) real-time
+    /// factor fed in 50 ms windows as capture does, and agreement with the
+    /// offline profile on frames where offline hears exactly one speaker.
+    /// NVIDIA's 1.04 s preset is printed alongside for comparison.
+    #[test]
+    #[ignore = "Requires pinned model and a 16 kHz WAV; real-model qualification"]
+    fn live_nemotron_live_profile_keeps_up_and_matches_offline() {
+        use super::super::nemotron::StreamingProfile;
+        let path = std::env::var("MEETILY_NEMOTRON_MODEL").unwrap();
+        let wav = std::env::var("MEETILY_NEMOTRON_WAV").unwrap();
+        let (audio, rate) = super::super::dsp::read_wav(std::path::Path::new(&wav)).unwrap();
+        assert_eq!(rate, 16000);
+        let frames = audio.len() / 160;
+        // `None` is the production live configuration.
+        let run = |profile: Option<StreamingProfile>| {
+            let mut model = NemotronDiarizationModel::new(&path, 8, 0.5).unwrap();
+            match profile {
+                Some(profile) => model.set_profile_for_test(profile).unwrap(),
+                None => model.enable_live_streaming().unwrap(),
+            }
+            let mut segments = Vec::new();
+            let half = audio.len() / 2;
+            let mut tail = std::time::Duration::ZERO;
+            for (i, samples) in audio.chunks(800).enumerate() {
+                let t = std::time::Instant::now();
+                segments.extend(model.feed(samples).unwrap());
+                if i * 800 >= half { tail += t.elapsed(); }
+            }
+            segments.extend(model.flush().unwrap());
+            let mut active = vec![0u8; frames];
+            for s in segments {
+                for f in (s.start / 160) as usize..((s.end / 160) as usize).min(frames) { active[f] |= 1 << s.speaker_id; }
+            }
+            (active, tail.as_secs_f64() / ((audio.len() - half) as f64 / RATE as f64))
+        };
+        // Optional: one byte per 10 ms frame (bit = speaker channel) for external
+        // comparison, e.g. against another runtime's port of the same model.
+        let dump = |name: &str, active: &[u8]| {
+            if let Ok(dir) = std::env::var("MEETILY_NEMOTRON_DUMP_DIR") {
+                std::fs::write(std::path::Path::new(&dir).join(format!("meetily-{name}.bin")), active).unwrap();
+            }
+        };
+        let (reference, _) = run(Some(StreamingProfile::offline()));
+        dump("offline", &reference);
+        let nvidia = StreamingProfile::low_latency();
+        let candidates = [(nvidia.chunk_len, nvidia.right_context, Some(nvidia)), (LIVE_CHUNK_FRAMES, LIVE_RIGHT_CONTEXT_FRAMES, None)];
+        for (chunk, rc, profile) in candidates {
+            let (active, tail_rtf) = run(profile);
+            dump(if profile.is_some() { "low" } else { "live" }, &active);
+            // Map candidate channels to reference channels by greatest co-activity.
+            let mut overlap = [[0usize; 8]; 8];
+            for (r, c) in reference.iter().zip(&active) {
+                for i in 0..8 { for j in 0..8 { if r & (1 << i) != 0 && c & (1 << j) != 0 { overlap[i][j] += 1; } } }
+            }
+            let map: Vec<usize> = (0..8).map(|j| (0..8).max_by_key(|&i| overlap[i][j]).unwrap()).collect();
+            let (mut single, mut agree) = (0, 0);
+            for (r, c) in reference.iter().zip(&active) {
+                if r.count_ones() == 1 {
+                    single += 1;
+                    let mapped = (0..8).filter(|&j| c & (1 << j) != 0).fold(0u8, |m, j| m | (1 << map[j]));
+                    if mapped & r != 0 { agree += 1; }
+                }
+            }
+            let agreement = agree as f64 / single.max(1) as f64;
+            println!("live profile chunk={chunk} rc={rc}: buffering {:.2} s, steady RTF {tail_rtf:.3}, single-speaker agreement with offline {:.1}% of {single} frames",
+                (chunk + rc) as f64 * 0.08, 100.0 * agreement);
+            if profile.is_none() {
+                // Headroom for ASR sharing the CPU; 0.8 already overflows within a meeting.
+                assert!(tail_rtf < 0.4, "live profile too slow: RTF {tail_rtf:.3}");
+                assert!(agreement > 0.97, "live profile diverges from offline: {agreement:.3}");
+            }
+        }
     }
     fn segment(start: u64, end: u64, speaker_id: usize) -> StreamingSpeakerSegment {
         StreamingSpeakerSegment { start, end, speaker_id }
