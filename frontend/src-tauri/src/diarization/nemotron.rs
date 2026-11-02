@@ -7,11 +7,24 @@ use super::{DiarizationResult, DiarizationSegment};
 #[allow(dead_code)] // Keep the attributed reference implementation's API intact.
 mod sortformer;
 pub(crate) use sortformer::SpeakerSegment as StreamingSpeakerSegment;
+#[cfg(test)]
+pub(crate) use sortformer::StreamingProfile;
 
 pub const NEMOTRON_MODEL_FILENAME: &str = "nemotron3_diar_v3.onnx";
 pub const NEMOTRON_EXPECTED_BYTES: u64 = 400_506_656;
 pub const NEMOTRON_SHA256: &str = "915e4fa23b0192ed9fadeb1cdd26847df986d50c92012d177be28d0343bbe03a";
 pub const DEFAULT_NEMOTRON_THRESHOLD: f32 = 0.50;
+/// Live profile in 80 ms model frames: 2.0 s emitted per step plus 0.32 s
+/// lookahead. NVIDIA's 1.04 s preset (9 + 4) runs at ~0.6x real time on an M4
+/// CPU by itself, so with Parakeet sharing the cores live labeling fell behind
+/// and its queue overflowed. Each step attends over the full speaker cache and
+/// FIFO, so a longer chunk is ~2-3x cheaper per second of audio (steady-state
+/// RTF ~0.25 vs ~0.57 on a two-speaker meeting) and agreed slightly better with
+/// the offline profile.
+pub const LIVE_CHUNK_FRAMES: usize = 25;
+pub const LIVE_RIGHT_CONTEXT_FRAMES: usize = 4;
+/// Audio samples per 80 ms model frame at 16 kHz.
+pub const SAMPLES_PER_FRAME: usize = 1280;
 pub const DEFAULT_MAX_SPEAKERS: usize = 8;
 
 pub struct NemotronDiarizationModel {
@@ -47,7 +60,16 @@ impl NemotronDiarizationModel {
     pub fn reset_streaming_state(&mut self) { self.model.reset_state(); }
 
     pub fn enable_live_streaming(&mut self) -> Result<()> {
-        self.model.set_profile(sortformer::StreamingProfile::low_latency())?;
+        let nvidia = sortformer::StreamingProfile::low_latency();
+        self.model.set_profile(sortformer::StreamingProfile {
+            chunk_len: LIVE_CHUNK_FRAMES, right_context: LIVE_RIGHT_CONTEXT_FRAMES, ..nvidia
+        })?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn set_profile_for_test(&mut self, profile: sortformer::StreamingProfile) -> Result<()> {
+        self.model.set_profile(profile)?;
         Ok(())
     }
 
