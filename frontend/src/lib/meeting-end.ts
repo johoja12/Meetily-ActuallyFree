@@ -71,6 +71,17 @@ export function snooze(state: EndState, now: number): EndState {
 }
 
 /**
+ * Words for the end prompt. The system notification is what someone sees with
+ * the window hidden in the menu bar, so when Meetily will stop by itself it
+ * must not ask them to open the app to stop it.
+ */
+export function endPromptCopy(autoStop: boolean): { description: string; notification: string } {
+  return autoStop
+    ? { description: 'Stopping and saving in 1 minute unless you keep recording.', notification: 'Stopping and saving in 1 minute. Open Meetily to keep recording.' }
+    : { description: 'Stop and save the recording?', notification: 'Open Meetily to stop and save the recording.' };
+}
+
+/**
  * What to do once the meeting seems over. A recording automation started from
  * the calendar has no app to hang up, so it always counts down and stops,
  * even with the prompt turned off; Keep recording still wins.

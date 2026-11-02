@@ -117,7 +117,12 @@ A pause, or a gap in level events, restarts the quiet clock; stale levels never
 count as silence. Keep recording (or closing the prompt) snoozes it for 10
 minutes and forgets the goodbyes. Settings > Meeting detection has the switch
 (on by default) and an opt-in "Stop and save automatically if I don't answer
-within 1 minute". Stopping uses the normal stop-and-save path. Prompts live in
+within 1 minute". Stopping uses the normal stop-and-save path and snoozes the
+watcher, because the save takes several seconds while `get_recording_state`
+still reports recording; without it a hung-up call prompted again mid-save. The
+system notification (what a menu-bar user sees) comes from `endPromptCopy`: for
+a countdown it says Meetily is stopping and saving and that opening it keeps
+recording, never "Open Meetily to stop". Prompts live in
 the WebView; a closed window loses only the prompt, never capture. Thresholds
 are not yet qualified against real calls; a muted listener in a long silent
 stretch will be asked. A recording meeting automation started for a heard
