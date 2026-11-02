@@ -161,6 +161,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[cfg_attr(windows, ignore = "Requires an audio output device; hosted Windows runners have none")]
     async fn test_get_output_device() {
         let result = get_active_audio_output().await;
         assert!(result.is_ok(), "Should be able to get output device");
