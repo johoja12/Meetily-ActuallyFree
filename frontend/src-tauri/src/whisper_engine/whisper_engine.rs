@@ -14,6 +14,25 @@ use crate::config::WHISPER_MODEL_CATALOG;
 use super::acceleration::{whisper_context_acceleration_for, WhisperCompiledBackend};
 
 const MAX_INITIAL_PROMPT_TOKENS: usize = 224;
+/// Upper bound on a timed batch segment, about 6-8 s of speech.
+const TIMED_SEGMENT_MAX_CHARS: i32 = 120;
+
+/// Decoding for batch (after-the-call) Whisper runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchDecoding {
+    /// Beam search with the hardware profile's beam size.
+    Beam,
+    /// One candidate per step: much less CPU work in the sampler.
+    Greedy,
+}
+
+/// One Whisper segment from `transcribe_timed`, timed from the start of its input.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TimedText {
+    pub text: String,
+    pub start_ms: f64,
+    pub end_ms: f64,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ModelStatus {
@@ -656,6 +675,83 @@ impl WhisperEngine {
         };
 
         Ok((cleaned_result, avg_confidence, is_partial))
+    }
+
+    /// Batch decode of a packed multi-segment window (see `audio::speech_windows`).
+    ///
+    /// Unlike the per-chunk calls above, timestamps stay on: the window holds
+    /// several utterances and each returned segment needs its own time span.
+    /// Times are in milliseconds from the start of `audio_data`. The caller pads
+    /// the window with trailing silence, because whisper.cpp stops seeking once
+    /// less than 1 s of input remains and would otherwise drop a short last
+    /// utterance.
+    pub async fn transcribe_timed(
+        &self,
+        audio_data: &[f32],
+        language: Option<String>,
+        initial_prompt: Option<&str>,
+        decoding: BatchDecoding,
+    ) -> Result<Vec<TimedText>> {
+        let ctx_lock = self.current_context.read().await;
+        let ctx = ctx_lock.as_ref()
+            .ok_or_else(|| anyhow!("No model loaded. Please load a model first."))?;
+        let prompt_tokens = Self::tokenize_initial_prompt(ctx, initial_prompt)?;
+        let adaptive_config = crate::audio::HardwareProfile::detect().get_whisper_config();
+
+        let mut params = match decoding {
+            BatchDecoding::Greedy => FullParams::new(SamplingStrategy::Greedy { best_of: 1 }),
+            BatchDecoding::Beam => FullParams::new(SamplingStrategy::BeamSearch {
+                beam_size: adaptive_config.beam_size as i32,
+                patience: 1.0,
+            }),
+        };
+        if !prompt_tokens.is_empty() {
+            params.set_tokens(&prompt_tokens);
+        }
+        let (language_code, should_translate) = match language.as_deref() {
+            Some("auto") | None => (None, false),
+            Some("auto-translate") => (None, true),
+            Some(lang) => (Some(lang), false),
+        };
+        params.set_language(language_code);
+        params.set_translate(should_translate);
+        if let Some(threads) = adaptive_config.max_threads {
+            params.set_n_threads(threads as i32);
+        }
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+        params.set_suppress_blank(true);
+        params.set_suppress_non_speech_tokens(true);
+        params.set_temperature(adaptive_config.temperature);
+        params.set_entropy_thold(2.4);
+        params.set_logprob_thold(-1.0);
+        params.set_no_speech_thold(if super::labs::strict_silence_enabled() { 0.45 } else { 0.55 });
+        // Each window starts fresh; carrying text across windows lets one
+        // hallucination repeat into the next.
+        params.set_no_context(true);
+        // Keep rows near the length of the old one-segment-per-call rows, so a
+        // row rarely spans a change of speaker. Splitting needs token times.
+        params.set_token_timestamps(true);
+        params.set_max_len(TIMED_SEGMENT_MAX_CHARS);
+        params.set_split_on_word(true);
+
+        let mut state = ctx.create_state()?;
+        state.full(params, audio_data)?;
+        let mut out = Vec::new();
+        for i in 0..state.full_n_segments()? {
+            let Ok(text) = state.full_get_segment_text_lossy(i) else { continue };
+            let text = Self::clean_repetitive_text(text.trim());
+            if text.is_empty() {
+                continue;
+            }
+            // whisper.cpp segment times are centiseconds.
+            let start_ms = state.full_get_segment_t0(i).unwrap_or(0) as f64 * 10.0;
+            let end_ms = state.full_get_segment_t1(i).unwrap_or(0) as f64 * 10.0;
+            out.push(TimedText { text, start_ms, end_ms: end_ms.max(start_ms) });
+        }
+        Ok(out)
     }
 
     pub async fn transcribe_audio(

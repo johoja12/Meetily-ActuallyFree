@@ -468,93 +468,88 @@ async fn run_retranscription<R: Runtime>(
         }
     }
 
-    let processable_count = processable_segments.len();
-    info!("Processing {} segments (after splitting)", processable_count);
+    // Very short (< 100 ms) and silent segments are dropped up front: silence
+    // invites Whisper hallucinations such as "you" or "thank you".
+    processable_segments.retain(|(segment, _)| {
+        let (rms, peak) = super::speech_windows::signal_level(&segment.samples);
+        segment.samples.len() >= 1600 && !(rms < 0.005 && peak < 0.01)
+    });
 
-    // Process each speech segment with progress updates
     let mut all_transcripts: Vec<(String, f64, f64)> = Vec::new(); // (text, start_ms, end_ms)
     let mut speaker_hints: Vec<Option<&'static str>> = Vec::new();
     let mut total_confidence = 0.0f32;
-
-    for (i, (segment, speaker_hint)) in processable_segments.iter().enumerate() {
-        // Check for cancellation before each segment
-        if RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst) {
-            return Err(anyhow!("Retranscription cancelled"));
+    let mut keep = |text: String, start_ms: f64, end_ms: f64, rms: f32, conf: f32, hint: Option<&'static str>| {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
         }
-
-        // Calculate progress (25% to 80% range for transcription)
-        let progress = 25 + ((i as f32 / processable_count as f32) * 55.0) as u32;
-        let segment_duration_sec = (segment.end_timestamp_ms - segment.start_timestamp_ms) / 1000.0;
-        emit_progress(
-            &app,
-            &meeting_id,
-            "transcribing",
-            progress,
-            &format!(
-                "Transcribing segment {} of {} ({:.1}s)...",
-                i + 1,
-                processable_count,
-                segment_duration_sec
-            ),
-        );
-
-        // Skip very short segments (< 100ms of audio = 1600 samples at 16kHz)
-        if segment.samples.len() < 1600 {
-            debug!("Skipping short segment {} with {} samples", i, segment.samples.len());
-            continue;
+        // Known Whisper silence hallucinations, when the audio behind them is quiet.
+        let lower = trimmed.to_lowercase();
+        if matches!(lower.as_str(), "you" | "you." | "thank you." | "thank you" | "thanks." | "bye." | "bye") && rms < 0.02 {
+            warn!("Dropping suspected silence hallucination at {:.1}s: '{}' (rms={:.5})", start_ms / 1000.0, trimmed, rms);
+            return;
         }
+        all_transcripts.push((trimmed.to_string(), start_ms, end_ms));
+        speaker_hints.push(hint);
+        total_confidence += conf;
+    };
 
-        // Skip silent segments (RMS < 0.005 and peak < 0.01) to prevent Whisper silence hallucinations (e.g. "you", "thank you")
-        let sum_sq: f32 = segment.samples.iter().map(|&x| x * x).sum();
-        let rms = (sum_sq / segment.samples.len() as f32).sqrt();
-        let peak = segment.samples.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
-        if rms < 0.005 && peak < 0.01 {
-            debug!("Skipping silent segment {} with RMS {:.5}, peak {:.5}", i, rms, peak);
-            continue;
+    let processable_count;
+    if let Some(engine) = whisper_engine.as_ref() {
+        // Whisper encodes 30 s per call however short the input, so consecutive
+        // segments of one source are decoded together (issue #14).
+        let mut windows = 0;
+        let texts = super::speech_windows::transcribe_packed(
+            engine,
+            &processable_segments,
+            language.clone(),
+            vocabulary.as_deref(),
+            |i, count, window| {
+                windows = count;
+                emit_progress(
+                    &app,
+                    &meeting_id,
+                    "transcribing",
+                    25 + ((i as f32 / count as f32) * 55.0) as u32,
+                    &format!(
+                        "Transcribing part {} of {} ({:.0}s)...",
+                        i + 1,
+                        count,
+                        (window.end_ms() - window.start_ms) / 1000.0
+                    ),
+                );
+                !RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst)
+            },
+        )
+        .await?
+        .ok_or_else(|| anyhow!("Retranscription cancelled"))?;
+        processable_count = windows;
+        for t in texts {
+            let conf = super::speech_windows::text_confidence(&t.text);
+            keep(t.text, t.start_ms, t.end_ms, t.rms, conf, t.speaker_hint);
         }
-
-        // Transcribe this segment
-        let (text, conf) = if use_parakeet {
-            let engine = parakeet_engine.as_ref().unwrap();
+    } else {
+        let engine = parakeet_engine.as_ref().unwrap();
+        processable_count = processable_segments.len();
+        info!("Processing {} segments (after splitting)", processable_count);
+        for (i, (segment, speaker_hint)) in processable_segments.iter().enumerate() {
+            if RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst) {
+                return Err(anyhow!("Retranscription cancelled"));
+            }
+            let segment_duration_sec = (segment.end_timestamp_ms - segment.start_timestamp_ms) / 1000.0;
+            emit_progress(
+                &app,
+                &meeting_id,
+                "transcribing",
+                25 + ((i as f32 / processable_count as f32) * 55.0) as u32,
+                &format!("Transcribing segment {} of {} ({:.1}s)...", i + 1, processable_count, segment_duration_sec),
+            );
             let text = engine
                 .transcribe_audio(segment.samples.clone(), vocabulary.as_deref())
                 .await
                 .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
-            (text, 0.9f32)
-        } else {
-            let engine = whisper_engine.as_ref().unwrap();
-            let (text, conf, _) = engine
-                .transcribe_audio_with_confidence(
-                    segment.samples.clone(),
-                    language.clone(),
-                    vocabulary.as_deref(),
-                )
-                .await
-                .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
-            (text, conf)
-        };
-
-        // Skip empty transcripts
-        let trimmed = text.trim();
-        if !trimmed.is_empty() {
-            // Filter out known Whisper silence hallucinations if energy is low
-            let lower = trimmed.to_lowercase();
-            let is_hallucination = (lower == "you" || lower == "you." || lower == "thank you." || lower == "thank you" || lower == "thanks." || lower == "bye." || lower == "bye") && rms < 0.02;
-            if is_hallucination {
-                warn!("Dropping suspected silence hallucination on segment {}: '{}' (rms={:.5}, conf={:.2})", i + 1, trimmed, rms, conf);
-                continue;
-            }
-
-            debug!(
-                "Segment {}/{}: {:.1}s, conf={:.2}, text='{}'",
-                i + 1, processable_count, segment_duration_sec, conf,
-                if trimmed.len() > 80 { let mut end = 80; while !trimmed.is_char_boundary(end) { end -= 1; } &trimmed[..end] } else { trimmed }
-            );
-            all_transcripts.push((text, segment.start_timestamp_ms, segment.end_timestamp_ms));
-            speaker_hints.push(*speaker_hint);
-            total_confidence += conf;
-        } else {
-            debug!("Segment {}/{}: {:.1}s — empty transcription", i + 1, processable_count, segment_duration_sec);
+            let (rms, _) = super::speech_windows::signal_level(&segment.samples);
+            keep(text, segment.start_timestamp_ms, segment.end_timestamp_ms, rms, 0.9, *speaker_hint);
         }
     }
 

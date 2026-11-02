@@ -551,76 +551,76 @@ async fn run_import<R: Runtime>(
         }
     }
 
-    let processable_count = processable_segments.len();
-    info!("Processing {} segments (after splitting)", processable_count);
+    // Segments under 100 ms carry no words.
+    processable_segments.retain(|segment| segment.samples.len() >= 1600);
 
-    // Process each speech segment
     let mut all_transcripts: Vec<(String, f64, f64)> = Vec::new();
     let mut total_confidence = 0.0f32;
+    let processable_count;
 
-    for (i, segment) in processable_segments.iter().enumerate() {
-        if IMPORT_CANCELLED.load(Ordering::SeqCst) {
+    if let Some(engine) = whisper_engine.as_ref() {
+        // Whisper encodes 30 s per call however short the input, so consecutive
+        // segments are decoded together (issue #14).
+        let unlabeled: Vec<(crate::audio::vad::SpeechSegment, Option<&'static str>)> =
+            processable_segments.into_iter().map(|segment| (segment, None)).collect();
+        let mut windows = 0;
+        let texts = super::speech_windows::transcribe_packed(
+            engine,
+            &unlabeled,
+            language.clone(),
+            vocabulary.as_deref(),
+            |i, count, window| {
+                windows = count;
+                emit_progress(
+                    &app,
+                    "transcribing",
+                    30 + ((i as f32 / count.max(1) as f32) * 50.0) as u32,
+                    &format!(
+                        "Transcribing part {} of {} ({:.0}s)...",
+                        i + 1,
+                        count,
+                        (window.end_ms() - window.start_ms) / 1000.0
+                    ),
+                );
+                !IMPORT_CANCELLED.load(Ordering::SeqCst)
+            },
+        )
+        .await?;
+        let Some(texts) = texts else {
             let _ = std::fs::remove_dir_all(&meeting_folder);
             return Err(anyhow!("Import cancelled"));
+        };
+        processable_count = windows;
+        for t in texts {
+            total_confidence += super::speech_windows::text_confidence(&t.text);
+            all_transcripts.push((t.text, t.start_ms, t.end_ms));
         }
-
-        let progress = 30 + ((i as f32 / processable_count.max(1) as f32) * 50.0) as u32;
-        let segment_duration_sec = (segment.end_timestamp_ms - segment.start_timestamp_ms) / 1000.0;
-        emit_progress(
-            &app,
-            "transcribing",
-            progress,
-            &format!(
-                "Transcribing segment {} of {} ({:.1}s)...",
-                i + 1,
-                processable_count,
-                segment_duration_sec
-            ),
-        );
-
-        // Skip very short segments
-        if segment.samples.len() < 1600 {
-            debug!(
-                "Skipping short segment {} with {} samples",
-                i,
-                segment.samples.len()
+    } else if let Some(engine) = parakeet_engine.as_ref() {
+        processable_count = processable_segments.len();
+        info!("Processing {} segments (after splitting)", processable_count);
+        for (i, segment) in processable_segments.iter().enumerate() {
+            if IMPORT_CANCELLED.load(Ordering::SeqCst) {
+                let _ = std::fs::remove_dir_all(&meeting_folder);
+                return Err(anyhow!("Import cancelled"));
+            }
+            let segment_duration_sec = (segment.end_timestamp_ms - segment.start_timestamp_ms) / 1000.0;
+            emit_progress(
+                &app,
+                "transcribing",
+                30 + ((i as f32 / processable_count.max(1) as f32) * 50.0) as u32,
+                &format!("Transcribing segment {} of {} ({:.1}s)...", i + 1, processable_count, segment_duration_sec),
             );
-            continue;
-        }
-
-        // Transcribe
-        let (text, conf) = if use_parakeet {
-            let engine = parakeet_engine.as_ref().unwrap();
             let text = engine
                 .transcribe_audio(segment.samples.clone(), vocabulary.as_deref())
                 .await
                 .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
-            (text, 0.9f32)
-        } else {
-            let engine = whisper_engine.as_ref().unwrap();
-            let (text, conf, _) = engine
-                .transcribe_audio_with_confidence(
-                    segment.samples.clone(),
-                    language.clone(),
-                    vocabulary.as_deref(),
-                )
-                .await
-                .map_err(|e| anyhow!("Whisper transcription failed on segment {}: {}", i, e))?;
-            (text, conf)
-        };
-
-        let trimmed = text.trim();
-        if !trimmed.is_empty() {
-            debug!(
-                "Segment {}/{}: {:.1}s, conf={:.2}, text='{}'",
-                i + 1, processable_count, segment_duration_sec, conf,
-                if trimmed.len() > 80 { let mut end = 80; while !trimmed.is_char_boundary(end) { end -= 1; } &trimmed[..end] } else { trimmed }
-            );
-            all_transcripts.push((text, segment.start_timestamp_ms, segment.end_timestamp_ms));
-            total_confidence += conf;
-        } else {
-            debug!("Segment {}/{}: {:.1}s — empty transcription", i + 1, processable_count, segment_duration_sec);
+            if !text.trim().is_empty() {
+                all_transcripts.push((text, segment.start_timestamp_ms, segment.end_timestamp_ms));
+                total_confidence += 0.9;
+            }
         }
+    } else {
+        processable_count = 0;
     }
 
     let transcribed_count = all_transcripts.len();

@@ -285,7 +285,25 @@ lifecycle lock until its last segment, so starting a recording uses
 `acquire_engine_lock_for_recording`: it stops the re-run at its next segment,
 emits `retranscription-paused-for-recording`, and waits at most 30 s instead of
 until the re-run would finish. The card shows "Paused while you record" and
-starts the re-run over 5 s after `recording-stopped`. Related
+starts the re-run over 5 s after `recording-stopped`.
+
+Whisper batch runs (retranscription and import) decode packed windows, not one
+VAD segment per call (issue #14). Whisper encodes 30 s per call whatever the
+input length, so 5 s segments made the encoder do ~6x the needed work.
+`audio/speech_windows.rs` packs consecutive segments of one source (never
+mixing mic and system tracks) into windows of at most 25 s, filling gaps with
+silence and starting a new window at gaps over 1.5 s, so window time maps
+linearly to recording time. `WhisperEngine::transcribe_timed` decodes a window
+with timestamps on (rows capped near 120 characters, about the old row length)
+and the caller adds 1 s of trailing silence so whisper.cpp keeps a short last
+utterance. Cancellation and recording preemption are checked per window.
+Parakeet still runs per segment. Measured on a 19.4 min room-mic meeting
+(M4, large-v3-turbo-q5_0, Metal): 259-274 s per segment vs 87-95 s packed;
+the two transcripts differ by ~14% of words with no clear winner (packing
+recovers speech the per-segment run dropped, and misses some words it had).
+Greedy decoding was no faster and hallucinated more, so beam search stays.
+The benchmark is the ignored test `speech_windows::bench::bench`, which reads
+a local recording from `MEETILY_BENCH_AUDIO`. Related
 speaker/retranscription dialogs. `useDiarizationEngine.ts` refreshes selected-engine
 state for dialogs, including native activation events and stale-response guards.
 
