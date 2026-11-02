@@ -31,9 +31,7 @@ use super::batch_processor::AudioMetricsBatcher;
 use crate::batch_audio_metric;
 use anyhow::Result;
 use log::{debug, error, info, warn};
-use rubato::{
-    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
-};
+use rubato::{FftFixedIn, Resampler};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -489,30 +487,37 @@ impl ProfessionalAudioMixer {
 }
 
 /// Persistent capture resampler with its partial input block. Rubato only
-/// accepts whole blocks, and `SincFixedIn` reports its `output_delay()` by
-/// shortening the first block's output rather than delaying the signal, so
-/// the delay frames stay held back until more input arrives. `drain` emits
-/// them and the partial block at Stop, without the zero padding that pushes
-/// them out: total output stays round(input frames × ratio).
+/// accepts whole blocks. Device rates are fixed, so this is rubato's FFT
+/// resampler: 16 kHz → 48 kHz is an exact 3x ratio, and an FFT per 512-frame
+/// block costs far less than the 512-tap sinc it replaced, which ran
+/// continuously for 16 kHz headsets (issue #16). The FFT resampler delays the
+/// signal by `output_delay()` frames, so those leading frames are dropped to
+/// keep mic and system tracks aligned. `drain` emits the partial block and the
+/// held-back frames at Stop: total output stays round(input frames × ratio).
 struct CaptureResampler {
-    resampler: SincFixedIn<f32>,
+    resampler: FftFixedIn<f32>,
     pending: Vec<f32>,
     chunk_size: usize,
     ratio: f64,
     input_frames: u64,
     output_frames: u64,
+    /// Leading output frames that are the resampler's delay, not signal.
+    delay_left: usize,
 }
 
 impl CaptureResampler {
-    fn new(resampler: SincFixedIn<f32>, chunk_size: usize, ratio: f64) -> Self {
-        Self {
+    fn new(input_rate: u32, output_rate: u32, chunk_size: usize) -> Result<Self, rubato::ResamplerConstructionError> {
+        let resampler = FftFixedIn::<f32>::new(input_rate as usize, output_rate as usize, chunk_size, 1, 1)?;
+        let delay_left = resampler.output_delay();
+        Ok(Self {
             resampler,
             pending: Vec::with_capacity(chunk_size * 2),
             chunk_size,
-            ratio,
+            ratio: output_rate as f64 / input_rate as f64,
             input_frames: 0,
             output_frames: 0,
-        }
+            delay_left,
+        })
     }
 
     /// Resample every complete block. Output of earlier blocks stays in `out`
@@ -552,6 +557,9 @@ impl CaptureResampler {
     }
 
     fn keep_real_output(&mut self, raw: Vec<f32>, out: &mut Vec<f32>) {
+        let skip = self.delay_left.min(raw.len());
+        self.delay_left -= skip;
+        let raw = &raw[skip..];
         let room = self.expected_output_frames().saturating_sub(self.output_frames);
         let keep = raw.len().min(room as usize);
         out.extend_from_slice(&raw[..keep]);
@@ -621,20 +629,7 @@ impl AudioCapture {
                 sample_rate, TARGET_SAMPLE_RATE
             );
 
-            // Log which resampling strategy will be used
-            let ratio = TARGET_SAMPLE_RATE as f64 / sample_rate as f64;
-            let strategy = if ratio >= 2.0 {
-                "High-quality upsampling (sinc_len=512, Cubic interpolation)"
-            } else if ratio >= 1.5 {
-                "Moderate upsampling (sinc_len=384, Cubic)"
-            } else if ratio > 1.0 {
-                "Small upsampling (sinc_len=256, Linear)"
-            } else if ratio <= 0.5 {
-                "Anti-aliased downsampling (sinc_len=512, Cubic)"
-            } else {
-                "Moderate downsampling (sinc_len=384, Linear)"
-            };
-            info!("   Resampling strategy: {}", strategy);
+            info!("   Resampling strategy: fixed-ratio FFT ({} Hz → {} Hz)", sample_rate, TARGET_SAMPLE_RATE);
         } else {
             info!(
                 "✅ [{:?}] Audio device '{}' ({:?}) uses {} Hz (matches pipeline)",
@@ -692,43 +687,14 @@ impl AudioCapture {
         const RESAMPLER_CHUNK_SIZE: usize = 512;
 
         let resampler = if needs_resampling {
-            let ratio = TARGET_SAMPLE_RATE as f64 / sample_rate as f64;
-
-            // Adaptive parameters based on sample rate ratio (same logic as resample_audio)
-            let (sinc_len, interpolation_type, oversampling) = if ratio >= 2.0 {
-                (512, SincInterpolationType::Cubic, 512)
-            } else if ratio >= 1.5 {
-                (384, SincInterpolationType::Cubic, 384)
-            } else if ratio > 1.0 {
-                (256, SincInterpolationType::Linear, 256)
-            } else if ratio <= 0.5 {
-                (512, SincInterpolationType::Cubic, 512)
-            } else {
-                (384, SincInterpolationType::Linear, 384)
-            };
-
-            let params = SincInterpolationParameters {
-                sinc_len,
-                f_cutoff: 0.95,
-                interpolation: interpolation_type,
-                oversampling_factor: oversampling,
-                window: WindowFunction::BlackmanHarris2,
-            };
-
-            match SincFixedIn::<f32>::new(
-                ratio,
-                2.0,  // Maximum relative deviation
-                params,
-                RESAMPLER_CHUNK_SIZE,
-                1,    // Mono
-            ) {
+            match CaptureResampler::new(sample_rate, TARGET_SAMPLE_RATE, RESAMPLER_CHUNK_SIZE) {
                 Ok(resampler) => {
                     info!(
                         "✅ Persistent resampler initialized for '{}' ({}Hz → {}Hz, chunk_size={})",
                         device.name, sample_rate, TARGET_SAMPLE_RATE, RESAMPLER_CHUNK_SIZE
                     );
                     info!("   Buffering enabled for variable-size chunks (e.g., 320, 512, 1024, etc.)");
-                    Some(CaptureResampler::new(resampler, RESAMPLER_CHUNK_SIZE, ratio))
+                    Some(resampler)
                 }
                 Err(e) => {
                     warn!(
@@ -2451,5 +2417,85 @@ mod ring_buffer_tests {
         let tail = received(&mut receiver);
         assert_eq!(tail.len(), 1);
         assert!(tail[0].data.iter().all(|sample| *sample == 0.0));
+    }
+}
+
+#[cfg(test)]
+mod capture_resampler_tests {
+    use super::CaptureResampler;
+
+    fn sine(rate: u32, hz: f32, seconds: f32) -> Vec<f32> {
+        (0..(rate as f32 * seconds) as usize)
+            .map(|i| 0.5 * (2.0 * std::f32::consts::PI * hz * i as f32 / rate as f32).sin())
+            .collect()
+    }
+
+    /// Feeds `input` in uneven callback sizes, then drains, as capture does.
+    fn run(input: &[f32], from: u32, to: u32) -> Vec<f32> {
+        let mut resampler = CaptureResampler::new(from, to, 512).unwrap();
+        let mut out = Vec::new();
+        let sizes = [320, 512, 1024, 100, 777];
+        let mut pos = 0;
+        for size in sizes.iter().cycle() {
+            if pos >= input.len() {
+                break;
+            }
+            let end = (pos + size).min(input.len());
+            resampler.process(&input[pos..end], &mut out).unwrap();
+            pos = end;
+        }
+        resampler.drain(&mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn output_length_is_exactly_input_times_ratio() {
+        for (from, seconds) in [(16_000, 2.0), (16_000, 0.01), (44_100, 1.3), (8_000, 0.7)] {
+            let input = sine(from, 440.0, seconds);
+            let out = run(&input, from, 48_000);
+            let expected = (input.len() as f64 * 48_000.0 / from as f64).round() as usize;
+            assert_eq!(out.len(), expected, "{from} Hz, {seconds} s");
+        }
+    }
+
+    #[test]
+    fn upsampled_signal_stays_time_aligned() {
+        // A misjudged delay shifts the signal; comparing with the ideal 48 kHz
+        // sine at the same instants catches even a one-sample shift.
+        let out = run(&sine(16_000, 997.0, 1.0), 16_000, 48_000);
+        let ideal = sine(48_000, 997.0, 1.0);
+        let (mut signal, mut noise) = (0.0f64, 0.0f64);
+        for i in 480..out.len() - 480 {
+            signal += (ideal[i] as f64).powi(2);
+            noise += ((out[i] - ideal[i]) as f64).powi(2);
+        }
+        let snr_db = 10.0 * (signal / noise).log10();
+        assert!(snr_db > 40.0, "SNR {snr_db:.1} dB");
+    }
+
+    /// Cost of the FFT resampler against the 512-tap sinc it replaced.
+    #[test]
+    #[ignore = "timing comparison"]
+    fn fft_vs_sinc_cost() {
+        use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
+        let input = sine(16_000, 440.0, 60.0);
+        let t = std::time::Instant::now();
+        let fft = run(&input, 16_000, 48_000);
+        let fft_time = t.elapsed();
+        let params = SincInterpolationParameters {
+            sinc_len: 512,
+            f_cutoff: 0.95,
+            interpolation: SincInterpolationType::Cubic,
+            oversampling_factor: 512,
+            window: WindowFunction::BlackmanHarris2,
+        };
+        let mut sinc = SincFixedIn::<f32>::new(3.0, 2.0, params, 512, 1).unwrap();
+        let t = std::time::Instant::now();
+        let mut n = 0;
+        for block in input.chunks_exact(512) {
+            n += sinc.process(&[block.to_vec()], None).unwrap()[0].len();
+        }
+        let sinc_time = t.elapsed();
+        println!("60 s of 16 kHz audio: fft {:?} ({} frames), sinc {:?} ({} frames)", fft_time, fft.len(), sinc_time, n);
     }
 }
