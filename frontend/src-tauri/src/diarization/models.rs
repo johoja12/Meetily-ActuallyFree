@@ -52,8 +52,11 @@ impl DiarizationModels {
         }
 
         let build = |path: &Path| -> Result<Session> {
+            // Idle ORT workers spin by default; these models load for every
+            // recording but run only occasionally (issue #16).
             Ok(Session::builder()?
                 .with_optimization_level(GraphOptimizationLevel::Level3)?
+                .with_intra_op_spinning(false)?
                 .with_execution_providers(vec![CPUExecutionProvider::default().build()])?
                 .commit_from_file(path)?)
         };

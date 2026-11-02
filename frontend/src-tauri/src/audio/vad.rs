@@ -1145,5 +1145,27 @@ mod tests {
 
         assert!(!all_segments.is_empty(), "Expected at least 1 speech segment from speech + pause");
     }
-}
 
+    /// Live-paced VAD for measuring CPU with `/usr/bin/time` (issue #16).
+    /// MEETILY_BENCH_AUDIO=/path/mic.mp4 cargo test --release ... vad_live_paced -- --ignored
+    #[test]
+    #[ignore = "needs a local recording; takes 30 s"]
+    fn vad_live_paced() {
+        let path = std::env::var("MEETILY_BENCH_AUDIO").expect("MEETILY_BENCH_AUDIO");
+        let samples = crate::audio::decoder::decode_audio_file(std::path::Path::new(&path))
+            .unwrap()
+            .to_whisper_format();
+        let mut processor = ContinuousVadProcessor::new_with_thresholds(16000, 350, 0.20, 0.10).unwrap();
+        let start = std::time::Instant::now();
+        let mut segments = 0;
+        // 30 s of audio in 30 ms chunks, delivered at capture pace.
+        for (i, chunk) in samples[..(30 * 16000).min(samples.len())].chunks(480).enumerate() {
+            segments += processor.process_audio(chunk).unwrap().len();
+            let due = std::time::Duration::from_millis(30 * (i as u64 + 1));
+            if let Some(wait) = due.checked_sub(start.elapsed()) {
+                std::thread::sleep(wait);
+            }
+        }
+        println!("vad_live_paced: {segments} segments in {:.1}s", start.elapsed().as_secs_f64());
+    }
+}

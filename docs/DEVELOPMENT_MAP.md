@@ -147,7 +147,7 @@ Paths below are relative to `frontend/src-tauri/src/` unless marked frontend.
 | `audio/recording_commands.rs` | Start/stop orchestration, selected-engine initialization, task lifetime, and transcript-update saving. Both recording start entry points need consistent behavior. |
 | `audio/recording_manager.rs` | Starts capture and the audio pipeline, coordinates source state and recording storage. |
 | `audio/pipeline.rs` | Alignment, independent source VAD, queueing completed turns, source/mixed track persistence, final audio drain. |
-| `audio/vad.rs` | Resampling and VAD clocks. `process_audio_observed` supplies continuous 16 kHz audio before speech segmentation. |
+| `audio/vad.rs` | Resampling and VAD clocks. `process_audio_observed` supplies continuous 16 kHz audio before speech segmentation. Silero runs through silero-rs pinned at 706be64, which uses one ONNX Runtime thread: the 4-thread pool of the earlier rev busy-waited between 30 ms calls and cost ~3x the CPU while recording (issue #16; ignored test `vad_live_paced`). |
 | `audio/transcription/worker.rs` | ASR execution and the final speaker/source string carried by transcript updates. |
 | `diarization/online.rs` | Selects the live engine at recording start; retains the existing Pyannote/WeSpeaker online clustering implementation. |
 | `diarization/live_nemotron.rs` | Dedicated streaming inference thread, bounded queue, timestamped history, overlap lookup, error notification, and input-close/stop distinction. |
