@@ -11,8 +11,8 @@ import { usePlatform } from '@/hooks/usePlatform';
 
 /** Where each platform's calendars come from (macOS Calendar, classic Outlook). */
 const SOURCE = {
-  mac: { device: 'this Mac', app: 'macOS Calendar', connect: 'Connect macOS Calendar', access: 'macOS calls the required permission full calendar access. No Microsoft app registration is needed.', indicator: 'macOS shows the microphone indicator' },
-  windows: { device: 'this PC', app: 'classic Outlook', connect: 'Connect Outlook', access: 'Outlook must be open. The new Outlook is not supported yet, and Outlook may ask you to allow access to attendee addresses. No sign-in or Microsoft app registration is needed.', indicator: 'Windows shows the microphone in use' },
+  mac: { device: 'this Mac', app: 'macOS Calendar', connect: 'Connect macOS Calendar', access: 'macOS calls the required permission full calendar access. No Microsoft app registration is needed.', indicator: 'macOS shows the microphone indicator', accounts: 'For an Outlook work calendar, first add your Exchange account in Calendar → Add Account. Then connect and choose it below.' },
+  windows: { device: 'this PC', app: 'classic Outlook', connect: 'Connect Outlook', access: 'Outlook must be open. The new Outlook is not supported yet, and Outlook may ask you to allow access to attendee addresses. No sign-in or Microsoft app registration is needed.', indicator: 'Windows shows the microphone in use', accounts: 'Meetily lists the calendars of every account in Outlook. To add one, use File → Add Account in Outlook, then refresh here.' },
 };
 
 export function CalendarSettings() {
@@ -38,7 +38,7 @@ export function CalendarSettings() {
           Meetily reads events locally and never edits your calendar. {source.access}
         </p>
         {!snapshot.supported ? <p className="mt-3 text-sm text-af-text-2">Local calendar access is available on macOS and Windows.</p> : <>
-          <p className="mt-3 text-xs leading-relaxed text-af-text-3">For an Outlook work calendar, first add your Exchange account in Calendar → Add Account. Then connect and choose it below.</p>
+          <p className="mt-3 text-xs leading-relaxed text-af-text-3">{source.accounts}</p>
           <div className="mt-4 flex flex-wrap gap-2">
             <Button aria-label={connected ? 'Refresh calendars' : source.connect} size="sm" variant={connected ? 'secondary' : 'primary'} disabled={busy} loading={busy} onClick={() => { void perform(connected ? 'calendar_refresh' : 'calendar_connect'); }}>
               {connected ? <RefreshCw /> : <CalendarDays />}{connected ? 'Refresh calendars' : source.connect}
