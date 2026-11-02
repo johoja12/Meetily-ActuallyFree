@@ -83,13 +83,13 @@ fn emit<R: Runtime>(app: Option<&AppHandle<R>>, p: DownloadProgress) {
     if let Some(app) = app { let _ = app.emit("diarization-download-progress", p); }
 }
 
-/// One verified file of a model install.
-struct Asset {
-    name: String,
-    dest: std::path::PathBuf,
-    size: u64,
-    url: String,
-    sha256: &'static str,
+/// One verified file of a model install. Also used by the Parakeet CoreML install.
+pub(crate) struct Asset {
+    pub(crate) name: String,
+    pub(crate) dest: std::path::PathBuf,
+    pub(crate) size: u64,
+    pub(crate) url: String,
+    pub(crate) sha256: &'static str,
 }
 
 fn nemotron_onnx_assets() -> Vec<Asset> {
@@ -272,7 +272,9 @@ pub async fn download_nemotron_coreml_quietly() -> Result<()> {
     install_assets::<tauri::Wry>(None, &nemotron_coreml_assets(), "Nemotron-3 CoreML model installed").await
 }
 
-async fn install_assets<R: Runtime>(app: Option<&AppHandle<R>>, assets: &[Asset], done: &str) -> Result<()> {
+/// Fetch each asset to a `.part` file, verify length and SHA-256, then rename
+/// into place; already-present files are verified and skipped. `None` = quiet.
+pub(crate) async fn install_assets<R: Runtime>(app: Option<&AppHandle<R>>, assets: &[Asset], done: &str) -> Result<()> {
     let total_bytes: u64 = assets.iter().map(|a| a.size).sum();
     let mut completed_bytes: u64 = 0;
     let client = reqwest::Client::builder()

@@ -459,6 +459,26 @@ impl ParakeetEngine {
         }
     }
 
+    /// Rebuild the loaded model (e.g. once its CoreML conversion is installed).
+    /// The replacement is built before the swap, so transcription waits only
+    /// for the swap itself. Returns whether a model was reloaded.
+    pub async fn reload_current_model(&self) -> Result<bool> {
+        let Some(name) = self.current_model_name.read().await.clone() else { return Ok(false) };
+        let (path, quantized) = {
+            let models = self.available_models.read().await;
+            let info = models.get(&name).ok_or_else(|| anyhow!("Model {} not found", name))?;
+            (info.path.clone(), info.quantization == QuantizationType::Int8)
+        };
+        let model = tokio::task::spawn_blocking(move || ParakeetModel::new(&path, quantized))
+            .await
+            .map_err(|e| anyhow!("Parakeet reload task failed: {e}"))?
+            .map_err(|e| anyhow!("Failed to reload Parakeet model {}: {}", name, e))?;
+        let runtime = model.runtime();
+        *self.current_model.write().await = Some(model);
+        log::info!("Parakeet model {name} reloaded on {runtime:?}");
+        Ok(true)
+    }
+
     /// Unload the current model
     pub async fn unload_model(&self) -> bool {
         let mut model_guard = self.current_model.write().await;

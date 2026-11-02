@@ -152,6 +152,8 @@ Paths below are relative to `frontend/src-tauri/src/` unless marked frontend.
 | `diarization/online.rs` | Selects the live engine at recording start; retains the existing Pyannote/WeSpeaker online clustering implementation. |
 | `diarization/live_nemotron.rs` | Dedicated streaming inference thread, bounded queue, timestamped history, overlap lookup, error notification, and input-close/stop distinction. |
 | `diarization/nemotron.rs` | Validates the pinned ONNX model and CoreML conversion, selects the runtime (CoreML by default on macOS), and adapts the attributed Sortformer API to Meetily. Live configuration must not change offline defaults. |
+| `coreml/` (`bridge.m`, `mod.rs`) | General macOS CoreML runner: named inputs/outputs of any rank, converted to and from the model's declared types and strides. |
+| `parakeet_engine/coreml.rs` | Pinned Parakeet v3 CoreML conversion: assets, verification, the four models, window splitting, empty-decode recovery rules, background install. |
 | `diarization/coreml.rs`, `coreml_bridge.m` | macOS CoreML runner for the fixed-shape conversion: input padding, fp16/stride conversion, one model per profile. |
 | `diarization/sortformer/` | Attributed model implementation, including speaker cache, feed/flush, streaming profiles, and ORT session construction. Preserve license/attribution. |
 | `audio/recording_saver.rs`, `audio/incremental_saver.rs` | Persistent transcript/source hints and recording tracks. Tracks are saved as lossless checkpoints and encoded to AAC once at stop or recovery, so saved audio stays aligned with transcript times (ARCHITECTURE.md section 3). A displayed rename alone does not update every save path. |
@@ -350,6 +352,36 @@ support fetches them quietly at launch (`prepare_nemotron_coreml_in_background`,
 holding the Nemotron model operation so it cannot race a Settings download or
 uninstall), then loads both models once so CoreML compiles them before a
 recording waits on it. Uninstall removes the `nemotron3-coreml` folder.
+
+**macOS Parakeet uses CoreML by default** for the v3 model: `ParakeetModel::new`
+selects the pinned conversion (`FluidInference/parakeet-tdt-0.6b-v3-coreml` at
+`parakeet_engine/coreml.rs` `REVISION`, CC-BY-4.0, folder
+`models/parakeet/parakeet-tdt-0.6b-v3-coreml` next to the ONNX model) when all of
+its files are present, and ONNX otherwise or if CoreML fails to load. Four
+fixed-shape models run through the general bridge `src/coreml/` (Objective-C,
+built by `build.rs`): Preprocessor (CPU) for one 15 s window, Encoder (188 frames),
+Decoder (one LSTM step) and JointDecisionv3 (argmax token, probability, duration
+bin, top-64 logits), the last three on CPU + Neural Engine. The greedy TDT loop
+(`decode_coreml_pass` in `model.rs`) follows FluidAudio's single-window decoder:
+blank primes the prediction network, a token whose duration overshoots the last
+frame is left to a short end-of-audio pass, one zero-duration repeat per frame,
+at most 10 per frame. An empty decode of 2 s+ of non-silent audio retries
+FluidAudio's five length-declaration perturbations and accepts the first with 2+
+tokens at mean confidence >= 0.7 (FluidAudio #909). Audio over 15 s (import and
+retranscription allow 25 s segments) is cut at its quietest 100 ms near each
+window end. Vocabulary, `<blk>` id, glossary boosting (over the top-64 candidates)
+and detokenizing are shared with ONNX. An existing v3 install fetches the files
+quietly at launch or after a v3 download (`coreml::prepare_in_background`), loads
+them once to compile, then reloads the engine's model unless a recording is
+running (it switches on the next load). The v3 ONNX path is unchanged.
+
+Measured on 64 segments (354.5 s) of a two-speaker room-microphone meeting,
+whole-clip WER against the post-call Whisper large-v3-turbo transcript (not ground
+truth; private audio): ONNX int8 55.5% at 0.075-0.10x real time; CoreML 45.2% at
+0.035x (FluidAudio's own pipeline: 45.3% at 0.037x in the same window). The ONNX
+gap is partly Meetily's: onnx-asr 0.12.0 on the same int8 files scores 50.9%, and
+its newer bundled `nemo128.onnx` preprocessor alone gains Meetily ~1.5 points.
+That ONNX fix is not made here.
 
 Windows Nemotron uses the pinned shared ONNX Runtime/DirectML integration, with
 CPU-session recreation when provider initialization fails. It does not inherit
@@ -598,6 +630,13 @@ room-microphone meeting whose live labeling had overflowed measured 0.26 / 99.3%
 (preset: 0.57 / 98.9%), and the streaming test found both speakers. A 188 s
 single-voice recording gave 0.20-0.26 / 99.5%; on it the multispeaker test fails
 for both profiles, as it should. Both recordings are private and not in the repo.
+
+Parakeet: `transcribe_segments_for_comparison` (ignored) transcribes
+`start\tend\treference` segments of `MEETILY_ASR_WAV` with the model in
+`MEETILY_PARAKEET_TEST_MODEL` (CoreML when its sibling `parakeet-tdt-0.6b-v3-coreml`
+folder is complete; `MEETILY_PARAKEET_RUNTIME=onnx` forces ONNX) and writes
+`MEETILY_ASR_OUT` for external WER scoring. `install_downloads_verifies_and_loads`
+(ignored, ~480 MB) installs the pinned CoreML files through the real download path.
 
 Ignored real-model tests require `MEETILY_NEMOTRON_MODEL` and
 `MEETILY_NEMOTRON_WAV` (16 kHz WAV). The identity test optionally reads

@@ -20,6 +20,8 @@
 pub mod parakeet_engine;
 pub mod labs;
 pub mod model;
+#[cfg(target_os = "macos")]
+pub mod coreml;
 pub mod commands;
 mod download_response;
 

@@ -30,6 +30,13 @@ fn main() {
             .flag("-fobjc-arc")
             .flag("-fblocks")
             .compile("meetily_coreml");
+        // General CoreML runner (src/coreml), used by Parakeet.
+        println!("cargo:rerun-if-changed=src/coreml/bridge.m");
+        cc::Build::new()
+            .file("src/coreml/bridge.m")
+            .flag("-fobjc-arc")
+            .flag("-fblocks")
+            .compile("meetily_coreml_models");
 
         // Let the enhanced_macos crate handle its own Swift compilation
         // The swift-rs crate build will be handled in the enhanced_macos crate's build.rs
