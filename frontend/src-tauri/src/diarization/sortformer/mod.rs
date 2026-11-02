@@ -267,9 +267,19 @@ pub fn graph_window(session: &Session) -> Option<StreamingWindow> {
     Some((dim("chunk")?, dim("spkcache")?, dim("fifo")?))
 }
 
+/// Where a streaming step runs. Both runtimes execute the same network and
+/// return left-packed `[spkcache | fifo | chunk]` outputs, so the state update
+/// below is shared (Meetily addition).
+enum Runtime {
+    Onnx(Session),
+    /// Fixed-shape CoreML conversion; inputs are zero-padded to its window.
+    #[cfg(target_os = "macos")]
+    CoreMl(crate::diarization::coreml::CoreMlSortformer),
+}
+
 /// Streaming Sortformer speaker diarization engine
 pub struct Sortformer {
-    session: Session,
+    runtime: Runtime,
     router: Option<Box<dyn SessionRouter>>,
     // The owned graph has fixed input shapes, so short chunks must be padded to full size.
     pinned: bool,
@@ -354,7 +364,7 @@ impl Sortformer {
 
         let pinned = graph_window(&session).is_some();
         let mut instance = Self {
-            session,
+            runtime: Runtime::Onnx(session),
             router: None,
             pinned,
             config,
@@ -382,9 +392,62 @@ impl Sortformer {
         (self.chunk_len + self.right_context) as f32 * FRAME_DURATION
     }
 
-    /// The session this instance owns.
-    pub fn session(&self) -> &Session {
-        &self.session
+    /// The ONNX session this instance owns, if it runs on ONNX Runtime.
+    pub fn session(&self) -> Option<&Session> {
+        match &self.runtime {
+            Runtime::Onnx(session) => Some(session),
+            #[cfg(target_os = "macos")]
+            Runtime::CoreMl(_) => None,
+        }
+    }
+
+    /// Build on a fixed-shape CoreML conversion of the same model (Meetily
+    /// addition). Its window fixes the streaming profile, so `profile` must
+    /// match it; `sil_emb` is the checkpoint's learned silence embedding.
+    #[cfg(target_os = "macos")]
+    pub fn with_coreml(
+        model_dir: &Path,
+        sil_emb: Vec<f32>,
+        profile: StreamingProfile,
+        config: DiarizationConfig,
+    ) -> Result<Self> {
+        let model = crate::diarization::coreml::CoreMlSortformer::load(model_dir)?;
+        Self::check_coreml_window(model.window(), profile)?;
+        if sil_emb.len() != EMB_DIM {
+            return Err(Error::Config(format!("silence embedding must have {EMB_DIM} values")));
+        }
+        let mut instance = Self {
+            runtime: Runtime::CoreMl(model),
+            router: None,
+            pinned: true,
+            config,
+            chunk_len: profile.chunk_len,
+            fifo_len: profile.fifo_len,
+            spkcache_len: profile.spkcache_len,
+            right_context: profile.right_context,
+            spkcache_update_period: profile.spkcache_update_period,
+            sil_emb: Array1::from_vec(sil_emb),
+            spkcache: Array3::zeros((1, 0, EMB_DIM)),
+            spkcache_preds: None,
+            fifo: Array3::zeros((1, 0, EMB_DIM)),
+            fifo_preds: Array3::zeros((1, 0, NUM_SPEAKERS)),
+            audio_buffer: Vec::new(),
+            elapsed_samples: 0,
+            mel_basis: support::create_mel_filterbank(N_FFT, N_MELS, SAMPLE_RATE).mapv(to_bf16),
+        };
+        instance.reset_state();
+        Ok(instance)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn check_coreml_window(window: crate::diarization::coreml::Window, profile: StreamingProfile) -> Result<()> {
+        let chunk = (profile.chunk_len + profile.right_context) * SUBSAMPLING;
+        if window.chunk_mel_frames != chunk || window.spkcache_frames != profile.spkcache_len || window.fifo_frames != profile.fifo_len {
+            return Err(Error::Config(format!(
+                "CoreML model window {window:?} does not match profile {profile:?}"
+            )));
+        }
+        Ok(())
     }
 
     /// Route streaming calls through `router`; calls it declines run on this instance's session.
@@ -413,6 +476,10 @@ impl Sortformer {
                 "spkcache_len ({}) must be a positive multiple of {NUM_SPEAKERS}",
                 profile.spkcache_len
             )));
+        }
+        #[cfg(target_os = "macos")]
+        if let Runtime::CoreMl(model) = &self.runtime {
+            Self::check_coreml_window(model.window(), profile)?;
         }
         self.chunk_len = profile.chunk_len;
         self.right_context = profile.right_context;
@@ -745,6 +812,12 @@ impl Sortformer {
             &empty_3d
         };
 
+        #[cfg(target_os = "macos")]
+        if let Runtime::CoreMl(model) = &mut self.runtime {
+            let (preds, hires, embs) = model.run(chunk_feat.view(), current_len, spkcache_ref.view(), fifo_ref.view())?;
+            return self.apply_streaming_outputs(preds, hires, embs, current_len, spkcache_len, fifo_len);
+        }
+
         // Create borrowed tensor views instead of cloning arrays
         let chunk_value = ort::value::TensorRef::<f32>::from_array_view(chunk_feat.view())?;
         let chunk_lengths_value = ort::value::Value::from_array(chunk_lengths)?;
@@ -762,9 +835,11 @@ impl Sortformer {
 
         // Run ONNX inference and extract all data in a block to release borrow
         let (preds_diar, preds_hires, new_embs) = {
-            let session = match routed {
-                Some(session) => session,
-                None => &mut self.session,
+            let session = match (routed, &mut self.runtime) {
+                (Some(session), _) => session,
+                (None, Runtime::Onnx(session)) => session,
+                #[cfg(target_os = "macos")]
+                (None, Runtime::CoreMl(_)) => unreachable!("CoreML steps return before ONNX tensors are built"),
             };
             let outputs = session.run(ort::inputs!(
                 "chunk" => chunk_value,
@@ -785,7 +860,20 @@ impl Sortformer {
         if let (Some(router), Some(started)) = (self.router.as_mut(), inference_start) {
             router.call_finished(window, started.elapsed());
         }
+        self.apply_streaming_outputs(preds_diar, preds_hires, new_embs, current_len, spkcache_len, fifo_len)
+    }
 
+    /// The host-side half of NeMo's streaming_update: FIFO/cache bookkeeping from
+    /// one step's left-packed outputs. Shared by the ONNX and CoreML runtimes.
+    fn apply_streaming_outputs(
+        &mut self,
+        preds_diar: Array3<f32>,
+        preds_hires: Array3<f32>,
+        new_embs: Array3<f32>,
+        current_len: usize,
+        spkcache_len: usize,
+        fifo_len: usize,
+    ) -> Result<Array2<f32>> {
         // only keep chunk_len predictions/embeddings... right_context frames
         // participaded in attenttion (__providing lookahead__) but are discarded here.
         let valid_frames = current_len.div_ceil(SUBSAMPLING);

@@ -17,6 +17,8 @@
 pub mod clustering;
 pub mod download;
 pub mod dsp;
+#[cfg(target_os = "macos")]
+pub mod coreml;
 pub mod live_nemotron;
 pub mod models;
 pub mod nemotron;
@@ -208,6 +210,39 @@ pub fn diarization_model_dir() -> PathBuf {
 /// Whether Pyannote model files are present (bundled or user-supplied).
 pub fn pyannote_models_available() -> bool {
     dir_has_models(&diarization_model_dir())
+}
+
+/// macOS: make Nemotron use CoreML by default. An install from before CoreML
+/// support gets the pinned conversion fetched quietly (ONNX keeps working
+/// meanwhile); then both models are loaded once so CoreML compiles them for
+/// this Mac before a recording start has to wait for it. Skipped while another
+/// Nemotron download or uninstall holds the model operation.
+pub fn prepare_nemotron_coreml_in_background() {
+    if !cfg!(target_os = "macos") || !get_active_engine().eq_ignore_ascii_case("nemotron") || !nemotron_models_available() {
+        return;
+    }
+    tauri::async_runtime::spawn(async {
+        if !nemotron::coreml_available() {
+            let Ok(_operation) = crate::optional_models::operation("nemotron") else {
+                log::info!("Nemotron CoreML: another model operation is running; trying again next launch");
+                return;
+            };
+            log::info!("Nemotron CoreML: fetching the CoreML conversion for this install");
+            if let Err(error) = download::download_nemotron_coreml_quietly().await {
+                log::warn!("Nemotron CoreML download failed; ONNX Runtime stays in use: {error}");
+                return;
+            }
+        }
+        let _ = tauri::async_runtime::spawn_blocking(|| {
+            for live in [true, false] {
+                let started = std::time::Instant::now();
+                match nemotron::NemotronDiarizationModel::coreml(&nemotron::coreml_dir(), nemotron::DEFAULT_NEMOTRON_THRESHOLD, live) {
+                    Ok(_) => log::info!("Nemotron CoreML {} model ready in {:.1} s", if live { "live" } else { "offline" }, started.elapsed().as_secs_f32()),
+                    Err(error) => log::warn!("Nemotron CoreML {} model failed to load; ONNX Runtime will be used: {error}", if live { "live" } else { "offline" }),
+                }
+            }
+        }).await;
+    });
 }
 
 /// Whether Nemotron-3 model files are present.
@@ -716,6 +751,8 @@ pub async fn download_diarization_models<R: tauri::Runtime>(
             .map_err(|e| format!("Model downloaded, but could not enable it: {e}"))?;
         use tauri::Emitter;
         let _ = app.emit("diarization-engine-changed", "nemotron");
+        drop(_optional_guard);
+        prepare_nemotron_coreml_in_background();
     }
     Ok(())
 }
