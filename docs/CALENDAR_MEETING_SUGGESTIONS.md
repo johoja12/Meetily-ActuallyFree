@@ -2,8 +2,10 @@
 
 Settings > Calendar connects to calendars synced into macOS Calendar. An Outlook
 work account can be added through Calendar > Add Account; Meetily does not reuse
-Outlook's sign-in or require its own Microsoft application registration. This
-implementation is macOS-only. The app reads calendar data and never edits events.
+Outlook's sign-in or require its own Microsoft application registration. On
+Windows (issue #13) the same features read classic Outlook through its COM object
+model; see "Windows: classic Outlook" below. Linux has no calendar source. The
+app reads calendar data and never edits events.
 
 ## User flow
 
@@ -176,6 +178,41 @@ fallback. Slow earlier responses cannot overwrite newer data. The root
 CalendarRecordingPrompts survives route navigation; the compact bar does not own
 calendar prompts. Recording start uses a one-use, ten-minute calendar selection
 in sessionStorage. Invalid/stale selections fall back to normal title behavior.
+
+## Windows: classic Outlook
+
+`calendar/outlook.rs` replaces EventKit on Windows and returns the same JSON as
+`macos.m`, so the cache, reminders, listening, automation hand-off and attendee
+matching are shared. It runs on its own short-lived STA thread inside the
+calendar worker (pool threads may already have COM initialized by the audio
+stack), so the existing single-query slot and 15 s / 125 s timeouts apply.
+
+- **Attach, don't launch.** The minute refresh uses `GetActiveObject` on a
+  running Outlook and otherwise reports "Outlook is not running"; only Connect
+  may start Outlook (`CoCreateInstance`). Not installed, or only the new Outlook
+  (no COM model), is reported as such.
+- **Calendars** are each store's default calendar plus its direct subfolders,
+  identified by folder `EntryID` and named "Folder · Store". Shared calendars
+  opened from another mailbox are not listed.
+- **Events** come from `Items` sorted by `[Start]` with `IncludeRecurrences`,
+  then `Restrict("[Start] <= end AND [End] >= start")` walked with
+  `GetFirst/GetNext` (Count is meaningless with recurrences). Restrict parses
+  dates in the user's locale, so the bounds are formatted with
+  `GetDateFormatEx`/`GetTimeFormatEx` for the user default locale. Outlook
+  times are local OLE dates, converted by `ole_date_to_ms`.
+- **Filtering** mirrors EventKit: no all-day, Free, cancelled or declined items.
+  An invitation (MeetingStatus not 0) or a meeting link in Location makes it a
+  meeting; Body is not read, because it is an Object Model Guard property.
+- **Attendees** (invitations only): Recipients that are not resources, decliners
+  or the current user, with the SMTP address (`Address`, or the Exchange user's
+  `PrimarySmtpAddress`). With antivirus inactive, Outlook may ask the user to
+  allow address access; a denial drops attendees only.
+
+Tests: pure helpers (OLE date conversion, offered/meeting rules, attendee and
+organizer rules, the Restrict filter) run on every platform. The COM code was
+type-checked against `x86_64-pc-windows-msvc` and compiled by Windows CI; it has
+not been run against a real Outlook profile, so locale date parsing in Restrict,
+recurrence expansion and Exchange address lookups are unverified.
 
 ## Verification and remaining limits
 

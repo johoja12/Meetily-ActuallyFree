@@ -206,7 +206,8 @@ source labels rather than guessing a speaker or switching engines.
 ### Calendar titles and recording prompts
 
 [CALENDAR_MEETING_SUGGESTIONS.md](CALENDAR_MEETING_SUGGESTIONS.md) maps the opt-in
-macOS Calendar reader, native reminder scheduler, Settings > Calendar, idle/live
+macOS Calendar reader (classic Outlook on Windows, `calendar/outlook.rs`), native
+reminder scheduler, Settings > Calendar, idle/live
 title choices, saved-recording historical matches (`calendar/saved.rs` and
 `SavedCalendarTitleSuggestions` in the meeting header), privacy/permission boundary,
 and native title ownership on save. Historical reads never feed recording prompts.

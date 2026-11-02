@@ -1,8 +1,10 @@
-//! Opt-in local calendar reading. A single bounded worker owns EventKit calls;
+//! Opt-in local calendar reading. A single bounded worker owns EventKit calls
+//! (macOS) and classic Outlook COM calls (Windows, `outlook.rs`);
 //! reminders are user prompts, never authority to start or stop capture.
 pub mod attendees;
 pub mod link;
 pub mod listen;
+mod outlook;
 pub mod saved;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -224,7 +226,7 @@ fn persist(settings: &CalendarSettings) -> Result<(), String> {
 fn snapshot() -> CalendarSnapshot {
     let state = state().lock().unwrap();
     CalendarSnapshot {
-        supported: cfg!(target_os = "macos"),
+        supported: cfg!(any(target_os = "macos", windows)),
         settings: state.settings.clone(),
         authorization: state.authorization.clone(),
         calendars: state.calendars.clone(),
@@ -276,9 +278,26 @@ fn read_platform(
         })
     }
 }
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+fn read_platform(
+    request_access: bool,
+    ids: &[String],
+    start_ms: i64,
+    end_ms: i64,
+) -> Result<ReadResult, String> {
+    let value = outlook::read(request_access, ids, start_ms, end_ms);
+    serde_json::from_value::<ReadResult>(value)
+        .map_err(|_| "Outlook returned invalid calendar data".to_string())
+        .map(|mut read| {
+            for event in &mut read.events {
+                event.attendees = attendees::normalize(std::mem::take(&mut event.attendees));
+            }
+            read
+        })
+}
+#[cfg(not(any(target_os = "macos", windows)))]
 fn read_platform(_: bool, _: &[String], _: i64, _: i64) -> Result<ReadResult, String> {
-    Err("Local calendar access is currently available on macOS".into())
+    Err("Local calendar access is available on macOS and Windows".into())
 }
 
 struct QueryGuard;
