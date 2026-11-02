@@ -721,6 +721,18 @@ jobs:
             target/x86_64-pc-windows-msvc/${{ steps.build-profile.outputs.profile }}/bundle/nsis/*.exe.sig
           retention-days: 30
 
+      # After the upload so a test failure still leaves the installer to inspect;
+      # the job fails either way. Same feature set as the bundled app.
+      - name: Test native capture, permissions, and transcription regressions
+        shell: bash
+        env:
+          PROFILE: ${{ steps.build-profile.outputs.profile }}
+        run: |
+          set -euo pipefail
+          release=()
+          if [[ "$PROFILE" == release ]]; then release=(--release); fi
+          cargo test "${release[@]}" --target x86_64-pc-windows-msvc -p meetily --lib --features vulkan -- --test-threads=1
+
       - name: Generate build summary
         shell: bash
         run: |
