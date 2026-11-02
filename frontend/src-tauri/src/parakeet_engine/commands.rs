@@ -456,6 +456,8 @@ pub async fn parakeet_download_model<R: Runtime>(
 
                 // Update tray menu to reflect model is now available
                 log::info!("Parakeet model download complete - updating tray menu");
+                #[cfg(target_os = "macos")]
+                crate::parakeet_engine::coreml::prepare_in_background();
                 crate::tray::update_tray_menu(&app_handle);
 
                 Ok(())

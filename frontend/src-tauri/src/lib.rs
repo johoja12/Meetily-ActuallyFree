@@ -42,6 +42,8 @@ pub mod calendar;
 pub mod claude_cli;
 pub mod config;
 pub mod console_utils;
+#[cfg(target_os = "macos")]
+pub mod coreml;
 pub mod crash_report;
 pub mod database;
 pub mod diarization;
@@ -630,6 +632,8 @@ pub fn run() {
             }
 
             diarization::prepare_nemotron_coreml_in_background();
+            #[cfg(target_os = "macos")]
+            parakeet_engine::coreml::prepare_in_background();
 
             Ok(())
         })

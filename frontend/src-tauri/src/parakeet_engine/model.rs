@@ -349,10 +349,27 @@ pub enum ParakeetError {
     RuntimeUnavailable(String),
 }
 
-pub struct ParakeetModel {
+struct OnnxSessions {
     encoder: Session,
     decoder_joint: Session,
     preprocessor: Session,
+}
+
+/// Where inference runs. Both use the same checkpoint, vocabulary, glossary
+/// boosting and detokenizer; CoreML is the default on macOS when its pinned
+/// conversion is installed next to the v3 model (see `coreml.rs`).
+enum Backend {
+    Onnx(OnnxSessions),
+    #[cfg(target_os = "macos")]
+    CoreMl(super::coreml::ParakeetCoreMl),
+}
+
+/// Which runtime a loaded model uses, for logs and diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParakeetRuntime { CoreMl, Onnx }
+
+pub struct ParakeetModel {
+    backend: Backend,
     vocab: Vec<String>,
     blank_idx: i32,
     vocab_size: usize,
@@ -370,8 +387,59 @@ impl Drop for ParakeetModel {
 }
 
 impl ParakeetModel {
+    /// CoreML on macOS when the pinned v3 conversion is installed next to a v3
+    /// model; otherwise (or if CoreML fails to load) ONNX Runtime.
     pub fn new<P: AsRef<Path>>(model_dir: P, quantized: bool) -> Result<Self, ParakeetError> {
+        #[cfg(target_os = "macos")]
+        if let Some(coreml_dir) = Self::coreml_dir_for(model_dir.as_ref()) {
+            match Self::new_coreml(&model_dir, &coreml_dir) {
+                Ok(model) => return Ok(model),
+                // Same checkpoint on another runtime, not a different model.
+                Err(error) => log::warn!("Parakeet: CoreML unavailable, using ONNX Runtime: {error}"),
+            }
+        }
         Self::new_with_backend(model_dir, quantized, super::labs::enabled())
+    }
+
+    /// The installed CoreML conversion for a v3 model directory, if complete.
+    pub fn coreml_dir_for(model_dir: &Path) -> Option<std::path::PathBuf> {
+        let is_v3 = model_dir.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("parakeet-tdt-0.6b-v3"));
+        let dir = super::coreml::dir_for(model_dir);
+        (is_v3 && super::coreml::available(&dir)).then_some(dir)
+    }
+
+    /// CoreML backend; `model_dir` still supplies `vocab.txt`.
+    #[cfg(target_os = "macos")]
+    pub fn new_coreml<P: AsRef<Path>>(model_dir: P, coreml_dir: &Path) -> Result<Self, ParakeetError> {
+        let runtime = super::coreml::ParakeetCoreMl::load(coreml_dir)
+            .map_err(|error| ParakeetError::RuntimeUnavailable(error.to_string()))?;
+        let (vocab, blank_idx) = Self::load_vocab(&model_dir)?;
+        log::info!("Parakeet: CoreML runtime loaded ({} tokens, blank_idx={blank_idx})", vocab.len());
+        Ok(Self {
+            backend: Backend::CoreMl(runtime),
+            vocab_size: vocab.len(),
+            vocab,
+            blank_idx,
+            vocabulary_source: None,
+            vocabulary_bias: None,
+        })
+    }
+
+    pub fn runtime(&self) -> ParakeetRuntime {
+        match self.backend {
+            Backend::Onnx(_) => ParakeetRuntime::Onnx,
+            #[cfg(target_os = "macos")]
+            Backend::CoreMl(_) => ParakeetRuntime::CoreMl,
+        }
+    }
+
+    /// Borrows only the backend field, so callers can still read other fields.
+    fn onnx(backend: &mut Backend) -> Result<&mut OnnxSessions, ParakeetError> {
+        match backend {
+            Backend::Onnx(sessions) => Ok(sessions),
+            #[cfg(target_os = "macos")]
+            Backend::CoreMl(_) => Err(ParakeetError::RuntimeUnavailable("ONNX sessions are not loaded for the CoreML backend".into())),
+        }
     }
 
     fn new_with_backend<P: AsRef<Path>>(model_dir: P, quantized: bool, gpu: bool) -> Result<Self, ParakeetError> {
@@ -389,9 +457,7 @@ impl ParakeetModel {
         );
 
         Ok(Self {
-            encoder,
-            decoder_joint,
-            preprocessor,
+            backend: Backend::Onnx(OnnxSessions { encoder, decoder_joint, preprocessor }),
             vocab,
             blank_idx,
             vocab_size,
@@ -548,7 +614,7 @@ impl ParakeetModel {
             "waveforms" => TensorRef::from_array_view(waveforms.view())?,
             "waveforms_lens" => TensorRef::from_array_view(waveforms_lens.view())?,
         ];
-        let outputs = self.preprocessor.run(inputs)?;
+        let outputs = Self::onnx(&mut self.backend)?.preprocessor.run(inputs)?;
 
         let features = outputs
             .get("features")
@@ -572,7 +638,7 @@ impl ParakeetModel {
             "audio_signal" => TensorRef::from_array_view(audio_signal.view())?,
             "length" => TensorRef::from_array_view(length.view())?,
         ];
-        let outputs = self.encoder.run(inputs)?;
+        let outputs = Self::onnx(&mut self.backend)?.encoder.run(inputs)?;
 
         let encoder_output = outputs
             .get("outputs")
@@ -590,7 +656,10 @@ impl ParakeetModel {
 
     pub fn create_decoder_state(&self) -> Result<DecoderState, ParakeetError> {
         // Get input shapes from decoder model
-        let inputs = &self.decoder_joint.inputs;
+        let Backend::Onnx(sessions) = &self.backend else {
+            return Err(ParakeetError::RuntimeUnavailable("ONNX decoder is not loaded".into()));
+        };
+        let inputs = &sessions.decoder_joint.inputs;
 
         let state1_shape = inputs
             .iter()
@@ -652,7 +721,7 @@ impl ParakeetModel {
             "input_states_2" => TensorRef::from_array_view(prev_state.1.view())?,
         ];
 
-        let outputs = self.decoder_joint.run(inputs)?;
+        let outputs = Self::onnx(&mut self.backend)?.decoder_joint.run(inputs)?;
 
         let logits = outputs
             .get("outputs")
@@ -835,12 +904,133 @@ impl ParakeetModel {
         }
     }
 
+    /// CoreML transcription: one window (15 s) at a time; longer audio is cut
+    /// at quiet points and the token streams are joined.
+    #[cfg(target_os = "macos")]
+    fn transcribe_coreml(&mut self, samples: &[f32]) -> Result<TimestampedResult, ParakeetError> {
+        let mut tokens = Vec::new();
+        let mut timestamps = Vec::new();
+        for range in super::coreml::split_windows(samples) {
+            let frame_offset = range.start / super::coreml::SAMPLES_PER_FRAME;
+            let (window_tokens, window_frames) = self.decode_coreml_window(&samples[range])
+                .map_err(|error| ParakeetError::RuntimeUnavailable(error.to_string()))?;
+            tokens.extend(window_tokens);
+            timestamps.extend(window_frames.into_iter().map(|t| t + frame_offset));
+        }
+        Ok(self.decode_tokens(tokens, timestamps))
+    }
+
+    /// Greedy TDT decoding over one CoreML window, following FluidAudio's
+    /// single-window decoder for this conversion (TdtDecoderV3): blank primes
+    /// the prediction network; blanks advance without touching it; a token is
+    /// emitted only while frames remain; one zero-duration repeat per frame;
+    /// at most `MAX_SYMBOLS_PER_FRAME` per frame; then a short end-of-audio pass
+    /// probes the last frames for tokens whose duration overshot the end.
+    #[cfg(target_os = "macos")]
+    fn decode_coreml_window(&mut self, samples: &[f32]) -> anyhow::Result<(Vec<i32>, Vec<usize>)> {
+        use super::coreml::{recovery_is_credible, should_recover_empty, LengthPolicy};
+        let (tokens, timestamps, _) = self.decode_coreml_pass(samples, LengthPolicy::default())?;
+        if !tokens.is_empty() || !should_recover_empty(samples) {
+            return Ok((tokens, timestamps));
+        }
+        for policy in LengthPolicy::RECOVERY {
+            let (retry, retry_timestamps, confidences) = self.decode_coreml_pass(samples, policy)?;
+            if recovery_is_credible(&confidences) {
+                log::info!("Parakeet CoreML: empty decode of {:.1} s recovered with {policy:?} ({} tokens)",
+                    samples.len() as f32 / 16000.0, retry.len());
+                return Ok((retry, retry_timestamps));
+            }
+        }
+        Ok((tokens, timestamps))
+    }
+
+    /// One decoding pass; returns tokens, their frames and their probabilities.
+    #[cfg(target_os = "macos")]
+    fn decode_coreml_pass(&mut self, samples: &[f32], policy: super::coreml::LengthPolicy) -> anyhow::Result<(Vec<i32>, Vec<usize>, Vec<f32>)> {
+        use super::coreml::{ParakeetCoreMl, TOP_K};
+        const MAX_SYMBOLS_PER_FRAME: usize = 10;
+        const END_BLANK_LIMIT: usize = 5;
+        let blank = self.blank_idx;
+        let Backend::CoreMl(runtime) = &mut self.backend else { anyhow::bail!("CoreML backend is not loaded") };
+        let (encoded, frames) = runtime.encode(samples, policy)?;
+        let mut tokens = Vec::new();
+        let mut timestamps = Vec::new();
+        let mut confidences = Vec::new();
+        if frames == 0 { return Ok((tokens, timestamps, confidences)); }
+        let mut state = runtime.decoder_step(blank, &ParakeetCoreMl::initial_state())?;
+        // Glossary boosting chooses among the joint's top-K candidates.
+        let mut logits = self.vocabulary_bias.as_ref().map(|_| vec![f32::NEG_INFINITY; self.vocab_size]);
+        let mut choose = |decision: &super::coreml::Decision, history: &[i32], bias: &mut Option<VocabularyBias>| -> i32 {
+            match (bias.as_mut(), logits.as_mut()) {
+                (Some(bias), Some(logits)) => {
+                    logits.fill(f32::NEG_INFINITY);
+                    for k in 0..TOP_K {
+                        let id = decision.top_ids[k];
+                        if id >= 0 && (id as usize) < logits.len() { logits[id as usize] = decision.top_logits[k]; }
+                    }
+                    bias.select_token(history, logits, decision.token)
+                }
+                _ => decision.token,
+            }
+        };
+        let (mut t, mut last_emission, mut emissions_here) = (0usize, usize::MAX, 0usize);
+        while t < frames {
+            let decision = runtime.joint(&encoded, t, &state.output)?;
+            let label = choose(&decision, &tokens, &mut self.vocabulary_bias);
+            let mut duration = TDT_DURATIONS.get(decision.duration_bin).copied().unwrap_or(1);
+            let is_blank = label == blank;
+            if !is_blank && duration == 0 && t == last_emission && emissions_here >= 1 { duration = 1; }
+            if is_blank && duration == 0 { duration = 1; }
+            let emitted_at = t;
+            t += duration;
+            if is_blank { continue; }
+            // A token whose duration carries past the last frame is left to
+            // the end-of-audio pass below, as in FluidAudio.
+            if t >= frames { break; }
+            tokens.push(label);
+            timestamps.push(emitted_at);
+            confidences.push(decision.probability);
+            state = runtime.decoder_step(label, &state)?;
+            if emitted_at == last_emission { emissions_here += 1; } else { last_emission = emitted_at; emissions_here = 1; }
+            if emissions_here >= MAX_SYMBOLS_PER_FRAME {
+                t = (t + 1).min(frames - 1);
+                emissions_here = 0;
+                last_emission = usize::MAX;
+            }
+        }
+        // End of audio: alternate the boundary frames until blanks dominate.
+        let mut position = t;
+        let (mut steps, mut blanks) = (0, 0);
+        while steps < MAX_SYMBOLS_PER_FRAME && blanks < END_BLANK_LIMIT {
+            let probes = [position.min(frames - 1), frames - 1, frames.saturating_sub(2)];
+            let frame = probes[steps % probes.len()];
+            let decision = runtime.joint(&encoded, frame, &state.output)?;
+            let duration = TDT_DURATIONS.get(decision.duration_bin).copied().unwrap_or(1);
+            if decision.token == blank {
+                blanks += 1;
+            } else {
+                blanks = 0;
+                tokens.push(decision.token);
+                timestamps.push(position.min(frames - 1));
+                confidences.push(decision.probability);
+                state = runtime.decoder_step(decision.token, &state)?;
+            }
+            position = (position + duration.max(1)).min(frames);
+            steps += 1;
+        }
+        Ok((tokens, timestamps, confidences))
+    }
+
     pub fn transcribe_samples(
         &mut self,
         samples: Vec<f32>,
         vocabulary: Option<&str>,
     ) -> Result<TimestampedResult, ParakeetError> {
         self.configure_vocabulary(vocabulary);
+        #[cfg(target_os = "macos")]
+        if matches!(self.backend, Backend::CoreMl(_)) {
+            return self.transcribe_coreml(&samples);
+        }
         let batch_size = 1;
         let samples_len = samples.len();
 
@@ -976,5 +1166,46 @@ mod vocabulary_bias_tests {
         let logits = vec![0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 1.5, -1.0];
 
         assert_eq!(bias.select_token(&[], &logits, 8), 7);
+    }
+}
+
+#[cfg(test)]
+mod qualification_tests {
+    use super::*;
+
+    /// Transcribes `start\tend\treference` segments of a 16 kHz WAV with the
+    /// production int8 model and writes `start\tend\tseconds\ttext` for external
+    /// scoring (e.g. WER against a reference, or another runtime's output).
+    #[test]
+    #[ignore = "Requires MEETILY_PARAKEET_TEST_MODEL, MEETILY_ASR_WAV, MEETILY_ASR_SEGMENTS, MEETILY_ASR_OUT"]
+    fn transcribe_segments_for_comparison() {
+        let model_dir = std::env::var("MEETILY_PARAKEET_TEST_MODEL").expect("v3 model directory");
+        let wav = std::env::var("MEETILY_ASR_WAV").unwrap();
+        let segments = std::fs::read_to_string(std::env::var("MEETILY_ASR_SEGMENTS").unwrap()).unwrap();
+        let (audio, rate) = crate::diarization::dsp::read_wav(Path::new(&wav)).unwrap();
+        assert_eq!(rate, 16000);
+        // MEETILY_PARAKEET_RUNTIME=onnx forces ONNX even where CoreML is installed.
+        let mut model = if std::env::var("MEETILY_PARAKEET_RUNTIME").as_deref() == Ok("onnx") {
+            ParakeetModel::new_with_backend(&model_dir, true, false).unwrap()
+        } else {
+            ParakeetModel::new(&model_dir, true).unwrap()
+        };
+        let runtime = model.runtime();
+        let mut out = String::new();
+        let (mut total, mut speech) = (0.0, 0.0);
+        for line in segments.lines() {
+            let mut fields = line.split('\t');
+            let start: f64 = fields.next().unwrap().parse().unwrap();
+            let end: f64 = fields.next().unwrap().parse().unwrap();
+            let range = (start * 16000.0) as usize..((end * 16000.0) as usize).min(audio.len());
+            let started = std::time::Instant::now();
+            let text = model.transcribe_samples(audio[range].to_vec(), None).unwrap().text;
+            let seconds = started.elapsed().as_secs_f64();
+            total += seconds;
+            speech += end - start;
+            out.push_str(&format!("{start:.3}\t{end:.3}\t{seconds:.4}\t{}\n", text.replace(['\t', '\n'], " ")));
+        }
+        std::fs::write(std::env::var("MEETILY_ASR_OUT").unwrap(), out).unwrap();
+        println!("{runtime:?} parakeet: {speech:.1} s of speech in {total:.2} s, RTF {:.4}", total / speech);
     }
 }
