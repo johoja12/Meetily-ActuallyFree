@@ -78,8 +78,40 @@ pub struct DownloadProgress {
     pub message: Option<String>,
 }
 
-fn emit<R: Runtime>(app: &AppHandle<R>, p: DownloadProgress) {
-    let _ = app.emit("diarization-download-progress", p);
+fn emit<R: Runtime>(app: Option<&AppHandle<R>>, p: DownloadProgress) {
+    // `None` is a quiet background install with no settings UI watching it.
+    if let Some(app) = app { let _ = app.emit("diarization-download-progress", p); }
+}
+
+/// One verified file of a model install.
+struct Asset {
+    name: String,
+    dest: std::path::PathBuf,
+    size: u64,
+    url: String,
+    sha256: &'static str,
+}
+
+fn nemotron_onnx_assets() -> Vec<Asset> {
+    let dir = super::diarization_user_model_dir();
+    NEMOTRON_ASSETS.iter().map(|(name, size, url, sha256)| Asset {
+        name: name.to_string(), dest: dir.join(name), size: *size, url: url.to_string(), sha256,
+    }).collect()
+}
+
+/// The pinned CoreML conversion (macOS only); see `nemotron::COREML_ASSETS`.
+fn nemotron_coreml_assets() -> Vec<Asset> { nemotron_coreml_assets_in(&super::nemotron::coreml_dir()) }
+
+fn nemotron_coreml_assets_in(dir: &Path) -> Vec<Asset> {
+    use super::nemotron::{COREML_ASSETS, COREML_REPO, COREML_REVISION};
+    if !cfg!(target_os = "macos") { return Vec::new(); }
+    COREML_ASSETS.iter().map(|(path, size, sha256)| Asset {
+        name: format!("CoreML {path}"),
+        dest: dir.join(path),
+        size: *size,
+        url: format!("https://huggingface.co/{COREML_REPO}/resolve/{COREML_REVISION}/{path}"),
+        sha256,
+    }).collect()
 }
 
 /// SHA-256 of a file on disk, lowercase hex.
@@ -98,6 +130,39 @@ mod tests {
         let size = future_size(super::super::download_diarization_models::<tauri::Wry>);
         assert!(size < 32 * 1024, "Download IPC future is {size} bytes; nested Tauri dispatch can overflow the Windows stack");
         println!("Download IPC future: {size} bytes");
+    }
+
+    /// Fetches the pinned CoreML files through the real install path into a
+    /// temporary folder (~400 MB), then loads both models from it.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[ignore = "Downloads ~400 MB from Hugging Face"]
+    async fn coreml_install_downloads_verifies_and_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        install_assets::<tauri::Wry>(None, &nemotron_coreml_assets_in(dir.path()), "done").await.unwrap();
+        // Already-present files are verified and skipped, not fetched again.
+        install_assets::<tauri::Wry>(None, &nemotron_coreml_assets_in(dir.path()), "done").await.unwrap();
+        let root = dir.path().to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            for live in [true, false] {
+                let model = super::super::nemotron::NemotronDiarizationModel::coreml(&root, 0.5, live).unwrap();
+                assert_eq!(model.runtime(), super::super::nemotron::NemotronRuntime::CoreMl);
+            }
+        }).await.unwrap();
+    }
+
+    #[test]
+    fn coreml_assets_download_into_their_own_pinned_folder() {
+        let assets = nemotron_coreml_assets();
+        if !cfg!(target_os = "macos") { assert!(assets.is_empty()); return; }
+        let dir = super::super::nemotron::coreml_dir();
+        assert_eq!(assets.len(), super::super::nemotron::COREML_ASSETS.len());
+        for asset in &assets {
+            assert!(asset.dest.starts_with(&dir), "{}", asset.name);
+            assert!(asset.url.starts_with("https://huggingface.co/FluidInference/nemotron-3-diarization-coreml/resolve/25a90f97f254428d4b30374b76af9c74fdee8327/"), "{}", asset.url);
+        }
+        // ONNX + CoreML: what a new macOS install fetches.
+        assert_eq!(nemotron_download_bytes(), 400_506_656 + 2660 + assets.iter().map(|a| a.size).sum::<u64>());
     }
 
     #[tokio::test]
@@ -150,7 +215,7 @@ pub async fn download_pyannote_models<R: Runtime>(app: &AppHandle<R>) -> Result<
                     completed_bytes += expected_size;
                     log::info!("✅ {} already present and verified", name);
                     emit(
-                        app,
+                        Some(app),
                         DownloadProgress {
                             file: name.to_string(),
                             file_index,
@@ -172,12 +237,12 @@ pub async fn download_pyannote_models<R: Runtime>(app: &AppHandle<R>) -> Result<
         let url = format!("{}/{}", PYANNOTE_RELEASE_BASE, name);
         log::info!("⬇️ Downloading {} …", name);
 
-        download_single_file(app, &client, &url, &dest, name, file_index, PYANNOTE_ASSETS.len(), *expected_size, Some(expected_hash), completed_bytes, total_bytes).await?;
+        download_single_file(Some(app), &client, &url, &dest, name, file_index, PYANNOTE_ASSETS.len(), *expected_size, Some(expected_hash), completed_bytes, total_bytes).await?;
         completed_bytes += expected_size;
     }
 
     emit(
-        app,
+        Some(app),
         DownloadProgress {
             file: String::new(),
             file_index: PYANNOTE_ASSETS.len(),
@@ -193,35 +258,45 @@ pub async fn download_pyannote_models<R: Runtime>(app: &AppHandle<R>) -> Result<
     Ok(())
 }
 
-/// Download the pinned NVIDIA Nemotron-3 ONNX export and its model license.
+/// Download the pinned NVIDIA Nemotron-3 ONNX export and its model license,
+/// plus the pinned CoreML conversion on macOS (used by default when present).
 pub async fn download_nemotron_models<R: Runtime>(app: &AppHandle<R>) -> Result<()> {
-    let dir = super::diarization_user_model_dir();
-    tokio::fs::create_dir_all(&dir).await?;
+    let mut assets = nemotron_onnx_assets();
+    assets.extend(nemotron_coreml_assets());
+    install_assets(Some(app), &assets, "Nemotron-3 Diarization model installed successfully").await
+}
 
-    let total_bytes: u64 = NEMOTRON_ASSETS.iter().map(|(_, sz, _, _)| *sz).sum();
+/// Fetch the CoreML conversion for an existing Nemotron install, without
+/// settings-UI progress. ONNX keeps serving diarization until it completes.
+pub async fn download_nemotron_coreml_quietly() -> Result<()> {
+    install_assets::<tauri::Wry>(None, &nemotron_coreml_assets(), "Nemotron-3 CoreML model installed").await
+}
+
+async fn install_assets<R: Runtime>(app: Option<&AppHandle<R>>, assets: &[Asset], done: &str) -> Result<()> {
+    let total_bytes: u64 = assets.iter().map(|a| a.size).sum();
     let mut completed_bytes: u64 = 0;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3600))
         .build()?;
 
-    for (index, (name, expected_size, url, expected_hash)) in NEMOTRON_ASSETS.iter().enumerate() {
-        let dest = dir.join(name);
+    for (index, asset) in assets.iter().enumerate() {
         let file_index = index + 1;
+        if let Some(parent) = asset.dest.parent() { tokio::fs::create_dir_all(parent).await?; }
 
         // Only an exact length and checksum can identify a completed artifact.
-        if dest.exists() {
-            if let Ok(meta) = tokio::fs::metadata(&dest).await {
-                if meta.len() == *expected_size && file_sha256(&dest).await? == *expected_hash {
-                    completed_bytes += expected_size;
-                    log::info!("✅ {} already present and verified by SHA-256", name);
+        if asset.dest.exists() {
+            if let Ok(meta) = tokio::fs::metadata(&asset.dest).await {
+                if meta.len() == asset.size && file_sha256(&asset.dest).await? == asset.sha256 {
+                    completed_bytes += asset.size;
+                    log::info!("✅ {} already present and verified by SHA-256", asset.name);
                     emit(
                         app,
                         DownloadProgress {
-                            file: name.to_string(),
+                            file: asset.name.clone(),
                             file_index,
-                            file_count: NEMOTRON_ASSETS.len(),
+                            file_count: assets.len(),
                             downloaded: meta.len(),
-                            total: *expected_size,
+                            total: asset.size,
                             percent: (completed_bytes as f32 / total_bytes as f32) * 100.0,
                             status: "skipped".into(),
                             message: Some("Already installed".into()),
@@ -230,25 +305,25 @@ pub async fn download_nemotron_models<R: Runtime>(app: &AppHandle<R>) -> Result<
                     continue;
                 }
             }
-            let _ = tokio::fs::remove_file(&dest).await;
+            let _ = tokio::fs::remove_file(&asset.dest).await;
         }
 
-        log::info!("⬇️ Downloading {} from {} …", name, url);
-        download_single_file(app, &client, url, &dest, name, file_index, NEMOTRON_ASSETS.len(), *expected_size, Some(expected_hash), completed_bytes, total_bytes).await?;
-        completed_bytes += expected_size;
+        log::info!("⬇️ Downloading {} from {} …", asset.name, asset.url);
+        download_single_file(app, &client, &asset.url, &asset.dest, &asset.name, file_index, assets.len(), asset.size, Some(asset.sha256), completed_bytes, total_bytes).await?;
+        completed_bytes += asset.size;
     }
 
     emit(
         app,
         DownloadProgress {
             file: String::new(),
-            file_index: NEMOTRON_ASSETS.len(),
-            file_count: NEMOTRON_ASSETS.len(),
+            file_index: assets.len(),
+            file_count: assets.len(),
             downloaded: total_bytes,
             total: total_bytes,
             percent: 100.0,
             status: "done".into(),
-            message: Some("Nemotron-3 Diarization model installed successfully".into()),
+            message: Some(done.into()),
         },
     );
 
@@ -256,7 +331,7 @@ pub async fn download_nemotron_models<R: Runtime>(app: &AppHandle<R>) -> Result<
 }
 
 async fn download_single_file<R: Runtime>(
-    app: &AppHandle<R>,
+    app: Option<&AppHandle<R>>,
     client: &reqwest::Client,
     url: &str,
     dest: &Path,
@@ -283,7 +358,8 @@ async fn download_single_file<R: Runtime>(
     }
     let content_len = response.content_length().unwrap_or(expected_size);
 
-    let part = dest.with_file_name(format!("{name}.part"));
+    let file_name = dest.file_name().and_then(|n| n.to_str()).ok_or_else(|| anyhow!("Invalid destination for {name}"))?;
+    let part = dest.with_file_name(format!("{file_name}.part"));
     let mut file = tokio::fs::File::create(&part).await?;
     let mut hasher = Sha256::new();
     let mut written: u64 = 0;
@@ -390,5 +466,5 @@ pub fn total_download_bytes() -> u64 {
 
 /// Total download size in bytes for Nemotron models.
 pub fn nemotron_download_bytes() -> u64 {
-    NEMOTRON_ASSETS.iter().map(|(_, sz, _, _)| *sz).sum()
+    nemotron_onnx_assets().iter().chain(nemotron_coreml_assets().iter()).map(|a| a.size).sum()
 }

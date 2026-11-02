@@ -629,6 +629,8 @@ pub fn run() {
                 log::warn!("Failed to resolve resource directory for templates");
             }
 
+            diarization::prepare_nemotron_coreml_in_background();
+
             Ok(())
         })
         .on_window_event(|window, event| {

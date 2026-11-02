@@ -22,6 +22,15 @@ fn main() {
             .flag("-fblocks")
             .compile("meetily_calendar");
 
+        // CoreML runner for the Nemotron 3 diarization conversion (diarization/coreml.rs).
+        println!("cargo:rustc-link-lib=framework=CoreML");
+        println!("cargo:rerun-if-changed=src/diarization/coreml_bridge.m");
+        cc::Build::new()
+            .file("src/diarization/coreml_bridge.m")
+            .flag("-fobjc-arc")
+            .flag("-fblocks")
+            .compile("meetily_coreml");
+
         // Let the enhanced_macos crate handle its own Swift compilation
         // The swift-rs crate build will be handled in the enhanced_macos crate's build.rs
     }

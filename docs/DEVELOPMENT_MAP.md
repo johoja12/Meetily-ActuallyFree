@@ -151,7 +151,8 @@ Paths below are relative to `frontend/src-tauri/src/` unless marked frontend.
 | `audio/transcription/worker.rs` | ASR execution and the final speaker/source string carried by transcript updates. |
 | `diarization/online.rs` | Selects the live engine at recording start; retains the existing Pyannote/WeSpeaker online clustering implementation. |
 | `diarization/live_nemotron.rs` | Dedicated streaming inference thread, bounded queue, timestamped history, overlap lookup, error notification, and input-close/stop distinction. |
-| `diarization/nemotron.rs` | Validates the pinned model and adapts the attributed Sortformer API to Meetily. Live configuration must not change offline defaults. |
+| `diarization/nemotron.rs` | Validates the pinned ONNX model and CoreML conversion, selects the runtime (CoreML by default on macOS), and adapts the attributed Sortformer API to Meetily. Live configuration must not change offline defaults. |
+| `diarization/coreml.rs`, `coreml_bridge.m` | macOS CoreML runner for the fixed-shape conversion: input padding, fp16/stride conversion, one model per profile. |
 | `diarization/sortformer/` | Attributed model implementation, including speaker cache, feed/flush, streaming profiles, and ORT session construction. Preserve license/attribution. |
 | `audio/recording_saver.rs`, `audio/incremental_saver.rs` | Persistent transcript/source hints and recording tracks. Tracks are saved as lossless checkpoints and encoded to AAC once at stop or recovery, so saved audio stays aligned with transcript times (ARCHITECTURE.md section 3). A displayed rename alone does not update every save path. |
 | `frontend/src/contexts/TranscriptContext.tsx` | Frontend transcript events, ordering/buffering, local recovery, and live state. |
@@ -197,23 +198,41 @@ turns still need it. `stop()` releases the session after transcription processin
 has been drained by recording-stop orchestration. Startup failures also clean up
 the live session.
 
-The live profile (`LIVE_CHUNK_FRAMES`/`LIVE_RIGHT_CONTEXT_FRAMES` in
-`nemotron.rs`) buffers 2.32 s of audio, emits 2.0 s strides, and uses 0.32 s
-lookahead; `live_nemotron.rs` derives its timeline stride from those constants.
-NVIDIA's 1.04 s preset averaged 0.69x real time alone on an M4 CPU (0.59 in
-steady state) and overflowed the queue ~3.5 min into a room-microphone meeting
-with Parakeet sharing the cores. Each step attends over the full speaker cache
-and FIFO, so the longer chunk costs ~0.25x real time in steady state. ONNX Runtime's CoreML execution provider was tried
-and rejected: MLProgram fails to compile this graph, and NeuralNetwork splits it
-into 320 partitions and fails at inference. A separate fixed-shape CoreML
-conversion of the same model (FluidAudio v0.17.7, `FluidInference/nemotron-3-
-diarization-coreml`, 8 speakers, same inputs/outputs) was evaluated with a
-throwaway Swift harness on the same 360 s clip, not integrated: its 1.04 s preset
-ran at 0.05x real time (0.10 CPU-only) at both idle and load ~30, against 0.57
-idle / 1.08 loaded for ONNX on CPU, and the 2.32 s profile's 0.26 / 0.38. Its
-offline output matched Meetily's ONNX offline output on 99.91% of 10 ms frames,
-and its 1.04 s preset agreed 99.3% (Meetily's: 98.9%). One two-speaker clip; not
-a general accuracy result. These model parameters are not an end-to-end UI latency claim:
+**Runtime.** On macOS, Nemotron runs on CoreML by default: `nemotron.rs` selects
+the pinned fixed-shape conversion of the same checkpoint
+(`FluidInference/nemotron-3-diarization-coreml` at `COREML_REVISION`, OpenMDW-1.1)
+when all of its files are present, and otherwise the ONNX export. Each compiled
+CoreML model is fixed to one profile: live uses NVIDIA's 1.04 s preset
+(`Nemotron3Diarizer_low`), post-call uses the 30.4 s offline profile
+(`Nemotron3Diarizer_offline`). `diarization/coreml_bridge.m` (Objective-C, built by
+`build.rs`) loads and runs a model; `coreml.rs` zero-pads chunk/speaker cache/FIFO to
+the model's window and passes the valid lengths. Valid outputs are left-packed
+`[spkcache | fifo | chunk]`, exactly what the dynamic ONNX graph returns, so the
+Sortformer state update (`apply_streaming_outputs`) is shared by both runtimes.
+A CoreML load failure logs a warning and uses ONNX for the same checkpoint; that
+is a runtime fallback, not a different diarization engine.
+
+Without CoreML (Windows, Linux, or a Mac whose CoreML files are missing) live
+diarization runs the ONNX live profile (`LIVE_CHUNK_FRAMES`/
+`LIVE_RIGHT_CONTEXT_FRAMES`): 2.32 s buffering, 2.0 s strides, 0.32 s lookahead.
+NVIDIA's 1.04 s preset averaged 0.69x real time alone on an M4 CPU and overflowed
+the queue ~3.5 min into a room-microphone meeting with Parakeet sharing the cores;
+each step attends over the full speaker cache and FIFO, so the longer chunk is
+~2-3x cheaper. `live_nemotron.rs` takes its timeline stride/lookahead from the
+loaded model (`Cadence`).
+
+ONNX Runtime's own CoreML execution provider was tried and rejected: MLProgram
+fails to compile the dynamic-shape graph, and NeuralNetwork splits it into 320
+partitions and fails at inference.
+
+Measured on an M4 with the first 360 s of a two-speaker room-microphone meeting
+(private, not in the repo), steady-state real-time factor and agreement with ONNX
+offline on single-speaker frames: CoreML live 0.050 / 98.9%, CoreML offline 0.003
+with 99.94% of 10 ms frames identical to ONNX offline, ONNX live 0.26 idle and 0.38
+at load ~38 / 99.3%, ONNX 1.04 s preset 0.57 idle and 0.98-1.19 loaded / 98.9%.
+One clip; not a general accuracy result.
+
+These model parameters are not an end-to-end UI latency claim:
 VAD boundaries, ASR time, and queue load also contribute. Timeline lookup waits
 at most 2.5 s; history is limited to ten minutes. Missing/failed results retain
 source labels rather than guessing a speaker or switching engines.
@@ -324,6 +343,13 @@ native `uninstall_optional_model` ownership in `optional_models.rs`; see the
 updated native-activation note for locking, settings events, tests, and limits.
 
 ## 5. Acceleration and packaging are separate from ASR selection
+
+macOS Nemotron uses CoreML (see Worker and shutdown ownership above). The
+CoreML files are part of the macOS Nemotron download; an install from before CoreML
+support fetches them quietly at launch (`prepare_nemotron_coreml_in_background`,
+holding the Nemotron model operation so it cannot race a Settings download or
+uninstall), then loads both models once so CoreML compiles them before a
+recording waits on it. Uninstall removes the `nemotron3-coreml` folder.
 
 Windows Nemotron uses the pinned shared ONNX Runtime/DirectML integration, with
 CPU-session recreation when provider initialization fails. It does not inherit
@@ -559,10 +585,15 @@ appropriate platform feature flags. Windows qualification uses release binaries
 and the packaged shared runtime; local `.build-tools/` scripts are environment-
 specific conveniences, not substitutes for documenting prerequisites/results.
 
-`live_nemotron_live_profile_keeps_up_and_matches_offline` (ignored) asserts the
+`live_nemotron_live_profile_keeps_up_and_matches_offline` (ignored) asserts each
 production live profile's steady-state real-time factor is below 0.4 and that it
-agrees with the offline profile on >97% of single-speaker frames, printing
-NVIDIA's 1.04 s preset alongside. On an M4, the first 360 s of the two-speaker
+agrees with ONNX offline on >97% of single-speaker frames, printing NVIDIA's 1.04 s
+ONNX preset alongside. With `MEETILY_NEMOTRON_COREML_DIR` set to a folder holding
+the pinned conversion, it and the two `nemotron.rs` real-model tests also run on
+CoreML, and CoreML offline must match ONNX offline on >99% of frames.
+`coreml_install_downloads_verifies_and_loads` (ignored, ~400 MB) installs the
+pinned files through the real download path into a temporary folder and loads both
+models. On an M4, the first 360 s of the two-speaker
 room-microphone meeting whose live labeling had overflowed measured 0.26 / 99.3%
 (preset: 0.57 / 98.9%), and the streaming test found both speakers. A 188 s
 single-voice recording gave 0.20-0.26 / 99.5%; on it the multispeaker test fails

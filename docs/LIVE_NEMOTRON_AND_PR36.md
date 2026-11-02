@@ -11,9 +11,10 @@ This addresses tensor construction; real-call/model accuracy is a separate check
 The live engine is selected at recording start. Nemotron loads before capture
 begins, consumes continuous system audio (including silence) after the existing
 48 kHz-to-16 kHz resampling, and uses the same recording-relative clock as VAD
-transcript turns. Its live profile has 2.32 s input buffering, 2.0 s stride,
-and 0.32 s lookahead (November 2: NVIDIA's 1.04 s preset could not keep up on
-an M4 CPU alongside Parakeet; see DEVELOPMENT_MAP.md); this is not an end-to-end transcription latency
+transcript turns. On macOS it runs a CoreML conversion with NVIDIA's 1.04 s
+preset; elsewhere (or without the CoreML files) ONNX runs a 2.32 s profile, because
+the 1.04 s preset could not keep up on an M4 CPU alongside Parakeet (November 2;
+see DEVELOPMENT_MAP.md); this is not an end-to-end transcription latency
 guarantee. Microphone capture remains authoritative for `You`.
 
 Inference runs on a dedicated thread behind a bounded, nonblocking capture

@@ -46,6 +46,12 @@ async fn remove_nemotron_files(directory: &Path) -> Result<(), String> {
             Err(error) => return Err(format!("Could not remove {name}: {error}")),
         }
     }
+    // The CoreML conversion lives in its own folder that only Meetily writes.
+    match tokio::fs::remove_dir_all(directory.join(crate::diarization::nemotron::COREML_DIR_NAME)).await {
+        Ok(()) => {},
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+        Err(error) => return Err(format!("Could not remove the CoreML diarization model: {error}")),
+    }
     Ok(())
 }
 
@@ -99,8 +105,12 @@ mod tests {
         for name in ["nemotron3_diar_v3.onnx", "Nemotron-LICENSE.txt", "nemotron3_diar_v3.onnx.part", "segmentation-3.0-fp16.onnx", "recording.mp4"] {
             tokio::fs::write(directory.path().join(name), b"fixture").await.unwrap();
         }
+        let coreml = directory.path().join("nemotron3-coreml/monolithic/v2/Nemotron3Diarizer_low.mlmodelc");
+        tokio::fs::create_dir_all(&coreml).await.unwrap();
+        tokio::fs::write(coreml.join("model.mil"), b"fixture").await.unwrap();
         remove_nemotron_files(directory.path()).await.unwrap();
         remove_nemotron_files(directory.path()).await.unwrap();
+        assert!(!directory.path().join("nemotron3-coreml").exists());
         assert!(!directory.path().join("nemotron3_diar_v3.onnx").exists());
         assert!(!directory.path().join("Nemotron-LICENSE.txt").exists());
         assert!(!directory.path().join("nemotron3_diar_v3.onnx.part").exists());
