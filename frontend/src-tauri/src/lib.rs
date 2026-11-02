@@ -999,6 +999,7 @@ pub fn run() {
             audio::import::is_import_in_progress_command,
             menu_bar::get_menu_bar_login,
             menu_bar::set_menu_bar_login,
+            menu_bar::log_webview_timing,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

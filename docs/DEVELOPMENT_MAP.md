@@ -358,7 +358,7 @@ provisioned by `build-nsis-progress-plugin.ps1` with tauri-bundler's pinned URLs
 and SHA-1s, because the bundler recreates an incomplete toolset and would drop the
 progress plugin.
 
-### Menu-bar mode (macOS)
+### Menu-bar mode (macOS) and the Windows tray
 
 `src-tauri/src/menu_bar.rs` owns window hiding. Closing the main window and ⌘Q
 ("Close to Menu Bar", which replaces the predefined Quit item because macOS
@@ -376,6 +376,23 @@ It is rewritten at each launch while enabled, so a moved app keeps working, and
 is not loaded into launchd until the next login. Tests cover the launch
 arguments and plist escaping; activation-policy switching and the login launch
 were not exercised by tests.
+
+Windows already closed to the tray. "Start at sign-in in the system tray" (same
+commands, issue #11) writes `HKCU\...\CurrentVersion\Run\Meetily - Actually Free`
+= `"<exe>" --menu-bar`. A Task Manager "Disabled" lives under
+`Explorer\StartupApproved\Run` (odd first byte); the switch reads it, turning
+the switch on clears it, and the startup refresh rewrites only the command.
+Tests cover the command quoting and the disabled flag; the registry calls were
+compiled only by Windows CI. On both platforms the config window exists before
+`setup` hides it, so a login launch may flash the window briefly.
+
+Windows has no equivalent of `backgroundThrottling`. Tauri's hide only hides the
+top-level HWND (`SW_HIDE`); the WebView2 controller stays `IsVisible`, so whether
+Chromium throttles the hidden page is unmeasured (issue #12).
+`components/diagnostics/HiddenTimerProbe.tsx` ticks every 15 s and, through
+`log_webview_timing`, logs page visibility changes and any tick 20 s to 30 min
+late ("WebView timer ran N ms late") to meetily.log on every platform. A tray-
+hidden Windows session with no such lines means automation timers keep time.
 
 ### Logs
 

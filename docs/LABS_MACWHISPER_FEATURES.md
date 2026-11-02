@@ -89,6 +89,17 @@ input without output. A detection
 event is not proof a meeting is underway; users should test the Labs action
 against their conferencing apps before relying on it.
 
+Windows (issue #10) uses the same speech check. Its active-media signal is
+CapabilityAccessManager: a known meeting app holding the microphone **or the
+webcam**, so a Teams/Zoom camera preview or device test was enough to start an
+automated recording. Such a match now waits for speech on the saved microphone
+like macOS; the stored "Name (input)" is mapped to the WASAPI/cpal name the same
+way. Meetily's own sampling lease is excluded by `is_self_process`. Process-only
+matches (no media held, Linux) are never sound-checked and never auto-start.
+Not yet run on Windows hardware: sampling the microphone while a meeting app
+holds it in WASAPI shared mode is expected to work; if it fails, the call is
+reported as before.
+
 ### Noticing when a meeting ends
 
 `components/recording/MeetingEndWatcher.tsx` (main window only) watches any

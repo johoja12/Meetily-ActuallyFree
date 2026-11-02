@@ -409,7 +409,6 @@ fn macos_audio_clients(sys: &sysinfo::System) -> Option<Vec<AudioClient>> {
 
 /// Only a call that is not yet reported, with active media, needs to be heard
 /// first. An already reported call (or one replacing another) is not re-checked.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn needs_sound_check(alerted: Option<&(String, String, bool)>, found: &(String, String, bool)) -> bool {
     found.2 && alerted.is_none()
 }
@@ -533,7 +532,6 @@ fn start_monitor<R: Runtime>(app: &AppHandle<R>) {
         let mut alerted: Option<(String, String, bool)> = None;
         let mut missing_since: Option<std::time::Instant> = None;
         // The app last logged as waiting for speech, so the log says it once.
-        #[cfg_attr(not(target_os = "macos"), allow(unused_mut, unused_variables))]
         let mut waiting_for: Option<String> = None;
 
         // Give the loop a moment before the first heavy scan.
@@ -560,13 +558,12 @@ fn start_monitor<R: Runtime>(app: &AppHandle<R>) {
                 (Some((_, process, true)), Some((_, candidate, false))) if process == &candidate => None,
                 (_, other) => other,
             };
-            // macOS: an app with microphone and speakers open may only be
-            // showing its join preview (Webex's microphone check and chime).
-            // Report a new call once the recording microphone hears speech;
-            // until then, keep checking each scan.
-            #[cfg(target_os = "macos")]
+            // An app holding the microphone (and on macOS the speakers) may
+            // only be showing its join preview: Webex's microphone check and
+            // chime, a Teams/Zoom camera and device test on Windows. Report a
+            // new call once the recording microphone hears speech; until then,
+            // keep checking each scan. Linux has no media signal (never active).
             let scan_was_empty = scan.is_none();
-            #[cfg(target_os = "macos")]
             let scan = match scan {
                 Some(found) if needs_sound_check(alerted.as_ref(), &found) && !crate::audio::recording_commands::is_recording_active() => {
                     use crate::calendar::listen;
@@ -600,10 +597,7 @@ fn start_monitor<R: Runtime>(app: &AppHandle<R>) {
                     missing_since = None;
                     if alerted.as_ref() != Some(&(friendly.clone(), process.clone(), active_media)) {
                         alerted = Some((friendly.clone(), process.clone(), active_media));
-                        #[cfg(target_os = "macos")]
-                        {
-                            waiting_for = None;
-                        }
+                        waiting_for = None;
                         log::info!("🔔 Meeting app detected: {} ({})", friendly, process);
                         let _ = app.emit(
                             "meeting-detected",
@@ -618,7 +612,6 @@ fn start_monitor<R: Runtime>(app: &AppHandle<R>) {
                 }
                 None => {
                     // Seen again after an absence, a call is logged again.
-                    #[cfg(target_os = "macos")]
                     if alerted.is_none() && scan_was_empty {
                         waiting_for = None;
                     }

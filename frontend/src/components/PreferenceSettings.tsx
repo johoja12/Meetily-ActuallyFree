@@ -8,9 +8,11 @@ import { toast } from "sonner"
 import Analytics from "@/lib/analytics"
 import { useConfig, NotificationSettings } from "@/contexts/ConfigContext"
 import { ThemePicker } from "@/components/settings/ThemePicker"
+import { usePlatform } from "@/hooks/usePlatform"
 
-/** macOS: closing and ⌘Q hide to the menu bar; this adds the login item. */
+/** Closing hides Meetily (macOS: to the menu bar, Windows: to the tray); this adds the login item. */
 function MenuBarLoginSetting() {
+  const windows = usePlatform() === "windows"
   // null: not offered on this platform (or not loaded yet).
   const [enabled, setEnabled] = useState<boolean | null>(null)
   const [busy, setBusy] = useState(false)
@@ -18,6 +20,7 @@ function MenuBarLoginSetting() {
     invoke<boolean | null>("get_menu_bar_login").then(setEnabled).catch(() => setEnabled(null))
   }, [])
   if (enabled === null) return null
+  const title = windows ? "Start at sign-in in the system tray" : "Start at login in the menu bar"
   const change = async (next: boolean) => {
     setBusy(true)
     try {
@@ -33,13 +36,14 @@ function MenuBarLoginSetting() {
     <div className="rounded-2xl border border-af-border bg-af-panel-2/40 p-5">
       <div className="flex items-center justify-between gap-4">
         <div>
-          <h3 className="text-[15px] font-semibold text-af-text mb-2">Start at login in the menu bar</h3>
+          <h3 className="text-[15px] font-semibold text-af-text mb-2">{title}</h3>
           <p className="text-sm text-af-text-2">
-            Open Meetily hidden when you log in, so meeting detection and automation are ready. Closing the window or
-            pressing ⌘Q keeps Meetily in the menu bar; quit it from the menu-bar icon. Takes effect at your next login.
+            {windows
+              ? "Open Meetily hidden when you sign in, so meeting detection and automation are ready. Closing the window keeps Meetily in the system tray; quit it from the tray icon. Takes effect at your next sign-in."
+              : "Open Meetily hidden when you log in, so meeting detection and automation are ready. Closing the window or pressing ⌘Q keeps Meetily in the menu bar; quit it from the menu-bar icon. Takes effect at your next login."}
           </p>
         </div>
-        <Switch checked={enabled} disabled={busy} onCheckedChange={(next) => void change(next)} aria-label="Start at login in the menu bar" />
+        <Switch checked={enabled} disabled={busy} onCheckedChange={(next) => void change(next)} aria-label={title} />
       </div>
     </div>
   )

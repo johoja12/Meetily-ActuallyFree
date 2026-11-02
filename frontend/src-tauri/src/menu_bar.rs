@@ -5,8 +5,9 @@
 //! the Dock's, while the icon shows) ends the app.
 //!
 //! "Start at login in the menu bar" is a per-user LaunchAgent that opens the
-//! app with `--menu-bar`, which starts it hidden. Other platforms keep their
-//! close-to-tray behavior and report the setting as unsupported.
+//! app with `--menu-bar`, which starts it hidden. Windows already closes to
+//! the tray; its "Start at login in the system tray" is a per-user Run entry
+//! with the same flag. Linux reports the setting as unsupported.
 use tauri::{AppHandle, Manager, Runtime};
 
 /// Passed by the login item: start with only the menu-bar icon.
@@ -124,6 +125,68 @@ fn write_agent() -> Result<(), String> {
     std::fs::write(&path, agent_plist(&launch_arguments(&exe))).map_err(|error| error.to_string())
 }
 
+/// Windows: a per-user Run entry. Task Manager's Startup apps toggle leaves it
+/// in place and records the choice under StartupApproved instead.
+#[cfg(windows)]
+const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+#[cfg(windows)]
+const STARTUP_APPROVED_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+#[cfg(windows)]
+const RUN_VALUE: &str = "Meetily - Actually Free";
+
+#[cfg(any(windows, test))]
+fn run_command(exe: &std::path::Path) -> String {
+    format!("\"{}\" {LAUNCH_FLAG}", exe.display())
+}
+
+/// StartupApproved data starts with 0x02 (enabled) or 0x03 (disabled); an
+/// odd first byte is how Task Manager marks an entry turned off.
+#[cfg(any(windows, test))]
+fn startup_disabled(approved: &[u8]) -> bool {
+    approved.first().is_some_and(|flags| flags & 1 == 1)
+}
+
+#[cfg(windows)]
+fn run_entry_enabled() -> bool {
+    use winreg::{enums::HKEY_CURRENT_USER, RegKey};
+    let user = RegKey::predef(HKEY_CURRENT_USER);
+    let present = user.open_subkey(RUN_KEY).is_ok_and(|key| key.get_value::<String, _>(RUN_VALUE).is_ok());
+    let disabled = user
+        .open_subkey(STARTUP_APPROVED_KEY)
+        .and_then(|key| key.get_raw_value(RUN_VALUE))
+        .is_ok_and(|value| startup_disabled(&value.bytes));
+    present && !disabled
+}
+
+#[cfg(windows)]
+fn write_run_entry() -> Result<(), String> {
+    use winreg::{enums::HKEY_CURRENT_USER, RegKey};
+    let exe = std::env::current_exe().map_err(|error| error.to_string())?;
+    let user = RegKey::predef(HKEY_CURRENT_USER);
+    let (run, _) = user.create_subkey(RUN_KEY).map_err(|error| error.to_string())?;
+    run.set_value(RUN_VALUE, &run_command(&exe)).map_err(|error| error.to_string())?;
+    // Turning the switch on also clears a Task Manager "Disabled".
+    if let Ok(approved) = user.open_subkey_with_flags(STARTUP_APPROVED_KEY, winreg::enums::KEY_SET_VALUE) {
+        let _ = approved.delete_value(RUN_VALUE);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn remove_run_entry() -> Result<(), String> {
+    use winreg::{enums::*, RegKey};
+    let user = RegKey::predef(HKEY_CURRENT_USER);
+    for path in [RUN_KEY, STARTUP_APPROVED_KEY] {
+        if let Ok(key) = user.open_subkey_with_flags(path, KEY_SET_VALUE) {
+            match key.delete_value(RUN_VALUE) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.to_string()),
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
 /// An enabled login item is rewritten at startup so it follows a moved app.
 pub fn refresh_login_item() {
     #[cfg(target_os = "macos")]
@@ -132,40 +195,103 @@ pub fn refresh_login_item() {
             log::warn!("Could not refresh the menu-bar login item: {error}");
         }
     }
+    // Rewriting only the command keeps a Task Manager "Disabled" choice.
+    #[cfg(windows)]
+    if run_entry_enabled() {
+        use winreg::{enums::*, RegKey};
+        let written = std::env::current_exe().map_err(|error| error.to_string()).and_then(|exe| {
+            RegKey::predef(HKEY_CURRENT_USER)
+                .open_subkey_with_flags(RUN_KEY, KEY_SET_VALUE)
+                .and_then(|run| run.set_value(RUN_VALUE, &run_command(&exe)))
+                .map_err(|error| error.to_string())
+        });
+        if let Err(error) = written {
+            log::warn!("Could not refresh the tray login item: {error}");
+        }
+    }
 }
 
-/// None where menu-bar mode is not offered.
+/// None where starting at login is not offered (Linux).
 #[tauri::command]
 pub fn get_menu_bar_login() -> Option<bool> {
     #[cfg(target_os = "macos")]
     return Some(agent_path().is_some_and(|path| path.exists()));
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    return Some(run_entry_enabled());
+    #[cfg(not(any(target_os = "macos", windows)))]
     None
 }
 
-/// Takes effect at the next login; nothing is loaded into launchd now.
+/// Takes effect at the next login; nothing is started now.
 #[tauri::command]
 pub fn set_menu_bar_login(enabled: bool) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        let path = agent_path().ok_or("no home folder")?;
-        if enabled {
-            write_agent()?;
-        } else if path.exists() {
-            std::fs::remove_file(&path).map_err(|error| error.to_string())?;
-        }
-        log::info!("Start at login in the menu bar: {enabled}");
+    set_login_item(enabled)?;
+    log::info!("Start at login hidden: {enabled}");
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn set_login_item(enabled: bool) -> Result<(), String> {
+    let path = agent_path().ok_or("no home folder")?;
+    if enabled {
+        write_agent()
+    } else if path.exists() {
+        std::fs::remove_file(&path).map_err(|error| error.to_string())
+    } else {
         Ok(())
     }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = enabled;
-        Err("Start at login in the menu bar is only available on macOS".into())
+}
+
+#[cfg(windows)]
+fn set_login_item(enabled: bool) -> Result<(), String> {
+    if enabled {
+        write_run_entry()
+    } else {
+        remove_run_entry()
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+fn set_login_item(_enabled: bool) -> Result<(), String> {
+    Err("Starting at login is not available on this platform".into())
+}
+
+/// Diagnostics from `HiddenTimerProbe`: whether the WebView's timers are
+/// throttled while the window is hidden (issue #12).
+#[tauri::command]
+pub fn log_webview_timing<R: Runtime>(app: AppHandle<R>, event: String, visibility: String, late_ms: Option<u64>) {
+    let window_visible = app.get_webview_window("main").and_then(|window| window.is_visible().ok());
+    let event: String = event.chars().take(32).collect();
+    let visibility: String = visibility.chars().take(16).collect();
+    match late_ms {
+        Some(late) => log::warn!("WebView timer ran {late} ms late (page {visibility}, window visible: {window_visible:?})"),
+        None => log::info!("WebView {event}: page {visibility}, window visible: {window_visible:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn windows_run_entry_quotes_the_exe_and_starts_hidden() {
+        assert_eq!(
+            run_command(Path::new(r"C:\Program Files\Meetily\meetily.exe")),
+            format!("\"C:\\Program Files\\Meetily\\meetily.exe\" {LAUNCH_FLAG}")
+        );
+    }
+
+    #[test]
+    fn task_manager_disabled_flag_is_an_odd_first_byte() {
+        assert!(!startup_disabled(&[0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+        assert!(startup_disabled(&[0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+        assert!(!startup_disabled(&[]));
     }
 }
 
 #[cfg(all(test, target_os = "macos"))]
-mod tests {
+mod macos_tests {
     use super::*;
     use std::path::Path;
 
