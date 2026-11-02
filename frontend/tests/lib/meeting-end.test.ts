@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { endAction, endReason, freshEndState, isGoodbye, noteGoodbye, noteLevel, type EndState } from '../../src/lib/meeting-end';
+import { endAction, endPromptCopy, endReason, freshEndState, isGoodbye, noteGoodbye, noteLevel, snooze, type EndState } from '../../src/lib/meeting-end';
 
 const MIN = 60_000;
 const T0 = 1_000_000_000;
@@ -93,4 +93,21 @@ test('a calendar meeting automation started always counts down to stop; others f
   assert.deepEqual(endAction({ prompt: true, autoStop: true }, false), { show: true, autoStop: true });
   // Auto-stop without the prompt shown never stops silently.
   assert.deepEqual(endAction({ prompt: false, autoStop: true }, false), { show: false, autoStop: false });
+});
+
+test('an automatic stop does not tell someone in the menu bar to open Meetily to stop it', () => {
+  const auto = endPromptCopy(true);
+  assert.match(auto.notification, /Stopping and saving in 1 minute/);
+  assert.match(auto.notification, /keep recording/);
+  assert.doesNotMatch(auto.notification, /to stop/);
+  assert.match(endPromptCopy(false).notification, /Open Meetily to stop and save/);
+});
+
+test('once a stop is requested, the ended call does not prompt again while saving', () => {
+  // The watcher snoozes on stop: the app-ended reason stays set otherwise, and
+  // the recording still reports running for the seconds the save takes.
+  const ended = { ...freshEndState(T0, null), appEnded: { at: T0 + 10 * MIN, app: 'Webex' } };
+  assert.equal(endReason(ended, T0 + 11 * MIN)?.reason, 'app');
+  const stopping = snooze(ended, T0 + 11 * MIN);
+  assert.equal(endReason(stopping, T0 + 11 * MIN + 3_000), null);
 });

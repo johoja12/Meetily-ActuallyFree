@@ -10,6 +10,7 @@ import { loadLabsPreferences } from '@/lib/labs';
 import { automatedRecording, isCalendarCall } from '@/lib/meeting-automation';
 import {
   endAction,
+  endPromptCopy,
   endReason,
   freshEndState,
   isGoodbye,
@@ -61,6 +62,10 @@ export function MeetingEndWatcher({ enabled }: { enabled: boolean }) {
     const stop = () => {
       if (prompt) prompt.handled = true;
       prompt = null;
+      // Saving takes several seconds while get_recording_state still reports
+      // recording; without this the watcher prompts again mid-save. If the stop
+      // fails, prompting resumes after the snooze.
+      if (state) state = snooze(state, Date.now());
       toast.dismiss(TOAST_ID);
       requestRecordingStop((href) => routerRef.current.push(href));
     };
@@ -75,16 +80,17 @@ export function MeetingEndWatcher({ enabled }: { enabled: boolean }) {
       const current = { autoStopAt: autoStop ? Date.now() + AUTO_STOP_MS : null, handled: false };
       prompt = current;
       const title = promptText(reason);
+      const copy = endPromptCopy(autoStop);
       toast(title, {
         id: TOAST_ID,
-        description: autoStop ? 'Stopping and saving in 1 minute unless you keep recording.' : 'Stop and save the recording?',
+        description: copy.description,
         duration: Infinity,
         action: { label: 'Stop & save', onClick: stop },
         cancel: { label: 'Keep recording', onClick: keep },
         // Closing the prompt means keep recording, for a while.
         onDismiss: () => { if (!current.handled && prompt === current) keep(); },
       });
-      invoke('show_simple_notification', { title, body: 'Open Meetily to stop and save the recording.' }).catch(() => {});
+      invoke('show_simple_notification', { title, body: copy.notification }).catch(() => {});
     };
 
     const tick = async () => {
