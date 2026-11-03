@@ -116,8 +116,10 @@ export function LiveAudioVisualizer({
     context.globalAlpha = 1;
   }, []);
 
-  // At most one draw per display frame, however many events arrive.
+  // At most one draw per display frame, however many events arrive. Without
+  // a display (tests, server render) there is nothing to draw on.
   const scheduleDraw = useCallback(() => {
+    if (typeof requestAnimationFrame !== 'function') return;
     if (frameRef.current === null) frameRef.current = requestAnimationFrame(draw);
   }, [draw]);
 
@@ -133,7 +135,7 @@ export function LiveAudioVisualizer({
     observer?.observe(canvas);
     return () => {
       observer?.disconnect();
-      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+      if (frameRef.current !== null && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(frameRef.current);
       frameRef.current = null;
     };
   }, [scheduleDraw]);
