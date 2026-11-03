@@ -141,6 +141,25 @@ export function AudioPlayerBar({
       </Hint>
     ) : null;
 
+  const sourceSwitch = audio.cleanedAvailable ? (
+    <Hint label={audio.source === 'cleaned' ? 'Playing with room echo reduced. Switch to the original recording' : 'Playing the original recording. Switch to the copy with room echo reduced'}>
+      <button
+        type="button"
+        onClick={() => audio.setSource(audio.source === 'cleaned' ? 'original' : 'cleaned')}
+        aria-pressed={audio.source === 'cleaned'}
+        disabled={status !== 'ready'}
+        className={cn(
+          'h-7 shrink-0 rounded-md px-2 text-[11px] font-semibold transition-colors disabled:opacity-40',
+          audio.source === 'cleaned'
+            ? 'bg-af-accent/[0.12] text-af-accent hover:bg-af-accent/[0.18]'
+            : 'text-af-text-2 hover:bg-af-hover hover:text-af-text',
+        )}
+      >
+        {audio.source === 'cleaned' ? 'Echo reduced' : 'Original'}
+      </button>
+    </Hint>
+  ) : null;
+
   if (status === 'unavailable' || status === 'error') {
     return (
       <div className="flex h-14 items-center gap-2 border-t border-af-border px-4 text-xs text-af-text-3">
@@ -252,6 +271,7 @@ export function AudioPlayerBar({
           {rate}×
         </button>
       </Hint>
+      {sourceSwitch}
       {textSwitch}
       <Hint label={follow ? 'Stop following the playback' : 'Follow the playback'}>
         <button

@@ -666,8 +666,8 @@ function handle(cmd: string, args: Args): unknown {
       return null;
     case 'api_get_meeting_audio':
       return transcripts(args.meetingId).length > 0
-        ? { path: `${PREVIEW_AUDIO}${args.meetingId}`, micPath: null, systemPath: null }
-        : { path: null, micPath: null, systemPath: null };
+        ? { path: `${PREVIEW_AUDIO}${args.meetingId}`, cleanedPath: null, micPath: null, systemPath: null }
+        : { path: null, cleanedPath: null, micPath: null, systemPath: null };
 
     // ---- Groups ----------------------------------------------------------
     case 'api_list_groups':
