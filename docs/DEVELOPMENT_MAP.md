@@ -22,6 +22,10 @@ and a model's anonymous speaker channels are also different concepts.
 persisted session mode, microphone diarization, and post-call provenance rules.
 In that opt-in mode the microphone is multi-speaker audio, so it does not
 establish `You`; computer/per-app capture is excluded for the session.
+After a room recording is saved, `audio/room_cleanup` writes a dereverberated
+`room-clean.m4a` for playback only (WPE, then DeepFilterNet limited to 12 dB);
+transcription and labeling keep using the original. See the note's "Cleaned
+playback copy" section.
 
 Speech-start pre-roll, live system speech sensitivity, and real-call replay
 qualification are documented in [LIVE_SPEECH_RETENTION.md](LIVE_SPEECH_RETENTION.md).

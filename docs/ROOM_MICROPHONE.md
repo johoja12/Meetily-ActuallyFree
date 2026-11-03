@@ -77,6 +77,64 @@ word-timed speakers. No physical Desk Pro or model/audio accuracy qualification
 has been performed for this feature. A test call must verify alternating local
 and remote speech, overlap, saved playback, Stop, and post-call speaker labels.
 
+## Cleaned playback copy
+
+Room recordings sound distant and hollow because the microphone hears the room's
+reverb. After a room recording is saved, a native background worker
+(`audio/room_cleanup/mod.rs`) writes `room-clean.m4a` beside it. The meeting
+player plays it by default and offers an **Echo reduced / Original** switch
+(`hooks/useMeetingAudio.ts`, `lib/playback-source.ts`); the choice is kept per
+computer and switching keeps position, speed and play state. `audio.mp4`,
+`mic.mp4` and every analysis path are unchanged: the copy is for listening only.
+
+Chain (input `mic.mp4`, which in room mode is the whole meeting; 48 kHz mono):
+
+1. `wpe.rs`: single-channel WPE dereverberation, a port of nara_wpe's `wpe` with
+   its STFT (periodic Blackman, 1024/256, fading pads, biorthogonal synthesis),
+   10 taps, delay 3, 3 iterations. nara_wpe estimates one filter per recording;
+   the port estimates one per 60 s block (carrying the prediction history across
+   blocks) so memory stays near 100 MB for any length.
+2. `dfn.rs`: DeepFilterNet 3 (official libDF v0.5.6 with its embedded model, pure
+   Rust tract backend, also on Windows) with the `deep-filter -D -a 12` settings:
+   at most 12 dB attenuation, no post-filter, -15/35/35 dB thresholds, max mask
+   reduction, model delay compensated.
+3. `level.rs`: makeup gain to the original's speech level (WPE removes reverb
+   energy inside every word, ~5 dB) measured on frames above -40 dBFS, so pauses
+   stay quieter; soft limiter with a 0.95 ceiling.
+4. FFmpeg AAC 128 kbps into `.room-clean.m4a.part`, renamed when complete.
+
+Lifecycle: the worker is started from app setup and owns all processing, so a
+job does not depend on any window. It runs at background QoS (macOS) / lowest
+thread priority (Windows) with a two-thread pool, waits while a recording is
+active and for 60 s afterwards, polls `is_recording_active` once per second of
+audio and abandons the job (deleting the partial file) when capture starts, then
+retries it. At startup it queues every completed room recording in the database
+without a copy, newest first. A failed job is logged and retried on the next
+launch, not in a loop. `api_get_meeting_audio` returns `cleanedPath`, and the
+`room-playback-cleaned` event lets an open meeting switch over without a reload
+(only while paused).
+
+Why playback only: on a 6 min English two-speaker room meeting (Jabra Speak
+710), five versions (unfiltered, DeepFilterNet full and 12 dB, WPE, WPE + 12 dB)
+were transcribed with Whisper large-v3-turbo, Parakeet v3 and Nemotron Speech
+0.6B. No filter made the models agree more (Parakeet vs Nemotron disagreement
+36.6% unfiltered, 38.7% full DeepFilterNet, 34.5-36.4% for the others), and full
+DeepFilterNet removed real words. WPE + 12 dB DeepFilterNet was chosen by
+listening for playback.
+
+Verification (macOS, M4): the Rust WPE matches nara_wpe on a 60 s room clip to
+136.7 dB SNR (whole-clip statistics); 60 s blocks differ from whole-clip WPE by
+28.5 dB SNR. The full in-app chain on the 6 min clip: 0 samples of lag against
+the original, 28.4 dB SNR against the listened-to Python/CLI version, speech
+level -14.7 dBFS vs -14.8 original, pauses 6.5 dB lower, peak 0.995 after AAC,
+360 s in 14.8 s at normal priority (RTF 0.04). Native tests: `room_cleanup`
+(11, plus ignored `cleans_a_real_recording` with `MEETILY_ROOM_CLEANUP_FOLDER`
+and `wpe_raw_file` for nara_wpe comparison); frontend:
+`tests/lib/playback-source.test.ts`. Limits: listening qualification is one
+meeting on one device; background-QoS speed on a busy machine and the Windows
+build are not yet measured; each copy adds ~58 MB per hour to the recordings
+folder.
+
 ## Local installation and initial hardware observation (October 26)
 
 Built using `frontend/scripts/build-macos-apple-silicon.sh` with the OpenSSL 3

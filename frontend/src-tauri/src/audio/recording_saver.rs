@@ -538,6 +538,12 @@ impl RecordingSaver {
             }
 
             info!("✅ Metadata updated with duration: {:?}s", metadata.duration_seconds);
+
+            // Room recordings get a dereverberated copy for listening; the
+            // worker waits until no recording is running.
+            if self.room_microphone && mic_audio_path.is_some() {
+                super::room_cleanup::enqueue(folder.clone());
+            }
         }
 
         // Emit save event with audio and transcript paths

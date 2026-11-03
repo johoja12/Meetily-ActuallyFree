@@ -431,6 +431,9 @@ pub async fn api_get_meetings<R: Runtime>(
 pub struct MeetingAudio {
     /// Mixed playback track (`audio.mp4`, or the imported file).
     pub path: Option<String>,
+    /// Dereverberated copy of a room-microphone recording, for listening only
+    /// (`audio::room_cleanup`). Absent until the background worker writes it.
+    pub cleaned_path: Option<String>,
     pub mic_path: Option<String>,
     pub system_path: Option<String>,
 }
@@ -450,6 +453,7 @@ pub async fn api_get_meeting_audio<R: Runtime>(
 
     let none = MeetingAudio {
         path: None,
+        cleaned_path: None,
         mic_path: None,
         system_path: None,
     };
@@ -495,6 +499,8 @@ pub async fn api_get_meeting_audio<R: Runtime>(
     });
     let audio = MeetingAudio {
         path: playback,
+        cleaned_path: crate::audio::room_cleanup::cleaned_playback_path(&dir)
+            .map(|path| path.to_string_lossy().to_string()),
         mic_path: existing("mic.mp4"),
         system_path: existing("system.mp4"),
     };
