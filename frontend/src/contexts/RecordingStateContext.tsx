@@ -103,7 +103,6 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
         activeDuration: backendState.active_duration,
       }));
 
-      console.log('[RecordingStateContext] Synced with backend:', backendState);
     } catch (error) {
       console.error('[RecordingStateContext] Failed to sync with backend:', error);
       // Don't update state on error - keep current state
@@ -118,8 +117,9 @@ export function RecordingStateProvider({ children }: { children: React.ReactNode
       clearInterval(pollingIntervalRef.current);
     }
 
-    console.log('[RecordingStateContext] Starting state polling (500ms interval)');
-    pollingIntervalRef.current = setInterval(syncWithBackend, 500);
+    // Once a second: durations are shown in whole seconds, and every update
+    // re-renders all consumers of this context.
+    pollingIntervalRef.current = setInterval(syncWithBackend, 1000);
   };
 
   /**

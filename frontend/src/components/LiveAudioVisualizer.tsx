@@ -235,10 +235,13 @@ export function LiveAudioVisualizer({
         return (
         <div
           key={index}
-          className={`${fill ? 'flex-1 min-w-[2px]' : 'w-[3px]'} rounded-sm transition-[height,opacity,background-color] duration-100 ease-out`}
+          // Full-height bars scaled from the bottom: transform and opacity are
+          // composited, while animating height forced a layout of every bar
+          // ~16 times a second per meter for the whole recording.
+          className={`${fill ? 'flex-1 min-w-[2px]' : 'w-[3px]'} h-full origin-bottom rounded-sm transition-[transform,opacity,background-color] duration-100 ease-out`}
           style={{
             backgroundColor: barColor,
-            height: `${Math.max(4, shown * 100)}%`,
+            transform: `scaleY(${Math.max(0.04, shown)})`,
             opacity: active ? 0.45 + shown * 0.55 : 0.45,
           }}
         />
