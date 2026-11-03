@@ -45,6 +45,11 @@ use super::recording_preferences;
 use super::recording_state::{AudioChunk, AudioError, DeviceType, RecordingState};
 use super::vad::{ContinuousVadProcessor, SpeechSegment};
 
+/// Level meter updates per source at most every 60 ms (~16 per second). Each
+/// update is a Tauri event to every window; 40 ms (25/s per source) cost the
+/// WebView more than the meters needed.
+const LEVEL_EMIT_INTERVAL_MS: u128 = 60;
+
 /// Per-source live audio level sample emitted to the frontend visualizer.
 /// One of these is sent per incoming (single-source) audio chunk, throttled
 /// to ~25 updates/sec per source so the meter animates smoothly without spam.
@@ -1421,7 +1426,7 @@ impl AudioPipeline {
                         } else {
                             &mut self.last_sys_level_emit
                         };
-                        if !chunk.data.is_empty() && now.duration_since(*last).as_millis() >= 40 {
+                        if !chunk.data.is_empty() && now.duration_since(*last).as_millis() >= LEVEL_EMIT_INTERVAL_MS {
                             *last = now;
                             let n = chunk.data.len() as f32;
                             let rms = (chunk.data.iter().map(|&x| x * x).sum::<f32>() / n).sqrt();
@@ -1601,7 +1606,7 @@ impl AudioPipeline {
     fn emit_mic_level(&mut self, mic: &[f32]) {
         let Some(level_tx) = self.level_sender.as_ref() else { return };
         let now = std::time::Instant::now();
-        if !self.ring_buffer.mic_enabled || mic.is_empty() || now.duration_since(self.last_mic_level_emit).as_millis() < 40 {
+        if !self.ring_buffer.mic_enabled || mic.is_empty() || now.duration_since(self.last_mic_level_emit).as_millis() < LEVEL_EMIT_INTERVAL_MS {
             return;
         }
         self.last_mic_level_emit = now;
