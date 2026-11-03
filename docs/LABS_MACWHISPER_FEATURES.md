@@ -177,7 +177,10 @@ On a future Pyannote live session, the remote centroid must clear cosine 0.80
 and exceed the next profile by 0.08 before a name is assigned. For Nemotron
 live sessions, a separate WeSpeaker matcher compares 2–15 second system-audio
 speech turns on the transcription worker and caches a verified name for that
-meeting-local channel. Nemotron still owns diarization; its channel number is
+meeting-local channel. Embedding a turn is the largest CPU cost of a live
+recording, so each channel is checked on its first four eligible turns, then
+at most every 30 s while unnamed and every 60 s once named
+(`voice_profiles::ChannelChecks`). Nemotron still owns diarization; its channel number is
 never treated as identity. Post-call diarization with either engine compares
 at least two clean system-track turns per remote channel against the profiles.
 Post-call transcription alone does not run this matching pass (the background
