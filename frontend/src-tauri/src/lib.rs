@@ -63,6 +63,7 @@ pub mod openai;
 pub mod openrouter;
 mod optional_models;
 pub mod parakeet_engine;
+mod perf_bench;
 pub mod paths;
 pub mod state;
 pub mod summary;

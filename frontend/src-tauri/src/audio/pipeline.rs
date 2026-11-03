@@ -1106,6 +1106,17 @@ fn new_mic_normalizer(sample_rate: u32) -> Option<LoudnessNormalizer> {
 }
 
 impl AudioPipeline {
+    /// Benchmarks (`perf_bench`) receive the saved tracks and level updates.
+    #[cfg(test)]
+    pub(crate) fn set_bench_outputs(
+        &mut self,
+        tracks: mpsc::UnboundedSender<AudioChunk>,
+        levels: mpsc::UnboundedSender<AudioLevels>,
+    ) {
+        self.recording_sender_for_mixed = Some(tracks);
+        self.level_sender = Some(levels);
+    }
+
     pub fn new(
         receiver: mpsc::UnboundedReceiver<AudioChunk>,
         transcription_sender: mpsc::UnboundedSender<AudioChunk>,
