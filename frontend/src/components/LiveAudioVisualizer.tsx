@@ -1,7 +1,8 @@
 'use client';
 
 /**
- * Live per-source audio level meter (mic OR system) rendered as animated bars.
+ * Live per-source audio level meter (mic OR system): a small scrolling bar
+ * history drawn on one canvas.
  *
  * Levels are pushed from Rust via the `recording-audio-levels` event (pre-mix,
  * per source) — the webview cannot read system audio, so these meters are
@@ -12,9 +13,10 @@
  * component renders at its intrinsic width.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { LOW_SYSTEM_AUDIO_MESSAGE, SystemAudioLevelMonitor } from '@/lib/system-audio-level';
+import { amplitudeOf, intrinsicMeterWidth, meterBars, pushLevel } from '@/lib/level-meter';
 
 /**
  * Per-source live audio level sample emitted by the Rust audio pipeline
@@ -49,27 +51,6 @@ interface LiveAudioVisualizerProps {
   displayGain?: number;
 }
 
-const SILENCE_DB = -50;
-const FULL_DB = -16;
-
-/** Linear amplitude from an RMS/peak pair. Speech on a raw device is often well below 0.05. */
-function amplitudeOf(rms: number, peak: number): number {
-  return Math.max(0, peak, rms * 1.45);
-}
-
-/**
- * Map amplitude to a 0..1 meter using a speech-range decibel scale.
- * -56 dB sits on the floor. About -30 dB (normal speech) is mid-meter.
- * -9 dB is full. `gain` is the volume slider, applied before the decibel
- * conversion so the bars show output level, not the raw input.
- */
-function visualLevel(amplitude: number, gain = 1): number {
-  const output = amplitude * Math.max(0.05, gain);
-  const db = 20 * Math.log10(Math.max(output, 1e-6));
-  const span = (db - SILENCE_DB) / (FULL_DB - SILENCE_DB);
-  return Math.min(1, Math.max(0, span));
-}
-
 /**
  * A compact, event-driven audio level meter. It subscribes to the Rust
  * `recording-audio-levels` event and renders a small row of bars that scrolls
@@ -77,6 +58,13 @@ function visualLevel(amplitude: number, gain = 1): number {
  * NOT open a second microphone stream (which would compete with the recording
  * capture) and it can faithfully show *system* audio, which the webview cannot
  * capture on its own.
+ *
+ * Rendering: levels arrive about 16 times a second per source for the whole
+ * recording. Drawing them on a canvas from the event handler, outside React
+ * state, avoids re-rendering and restyling every bar on each update. The
+ * earlier DOM bars each carried a CSS transition that never finished at this
+ * rate, so WebKit kept dozens of composited layers and animations alive; that
+ * was most of the recording window's CPU (issue #21).
  */
 export function LiveAudioVisualizer({
   active,
@@ -90,40 +78,85 @@ export function LiveAudioVisualizer({
   displayGain = 1,
 }: LiveAudioVisualizerProps) {
   const previewMode = feedTick !== undefined;
-  const [levels, setLevels] = useState<number[]>(() => new Array(bars).fill(0));
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const frameRef = useRef<number | null>(null);
+  const drawStateRef = useRef({ active, fill, displayGain });
+  drawStateRef.current = { active, fill, displayGain };
   const [limiterWarning, setLimiterWarning] = useState(false);
   const [lowWarning, setLowWarning] = useState(false);
   const lowMonitorRef = useRef(new SystemAudioLevelMonitor());
   const lowClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const levelsRef = useRef<number[]>(new Array(bars).fill(0));
+
+  const draw = useCallback(() => {
+    frameRef.current = null;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const width = canvas.clientWidth;
+    const height = canvas.clientHeight;
+    const scale = window.devicePixelRatio || 1;
+    const pixelWidth = Math.round(width * scale);
+    const pixelHeight = Math.round(height * scale);
+    if (canvas.width !== pixelWidth) canvas.width = pixelWidth;
+    if (canvas.height !== pixelHeight) canvas.height = pixelHeight;
+    const context = canvas.getContext('2d');
+    if (!context) return;
+    const { active: isActive, fill: isFill, displayGain: gain } = drawStateRef.current;
+    context.setTransform(scale, 0, 0, scale, 0, 0);
+    context.clearRect(0, 0, width, height);
+    // The canvas's CSS color is the resolved bar color (theme tokens included).
+    context.fillStyle = getComputedStyle(canvas).color;
+    for (const bar of meterBars(levelsRef.current, width, height, { fill: isFill, active: isActive, gain })) {
+      context.globalAlpha = bar.alpha;
+      context.beginPath();
+      if (typeof context.roundRect === 'function') context.roundRect(bar.x, bar.y, bar.width, bar.height, Math.min(2, bar.width / 2));
+      else context.rect(bar.x, bar.y, bar.width, bar.height);
+      context.fill();
+    }
+    context.globalAlpha = 1;
+  }, []);
+
+  // At most one draw per display frame, however many events arrive.
+  const scheduleDraw = useCallback(() => {
+    if (frameRef.current === null) frameRef.current = requestAnimationFrame(draw);
+  }, [draw]);
+
+  const setLevels = useCallback((next: number[]) => {
+    levelsRef.current = next;
+    scheduleDraw();
+  }, [scheduleDraw]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(scheduleDraw);
+    observer?.observe(canvas);
+    return () => {
+      observer?.disconnect();
+      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
+      frameRef.current = null;
+    };
+  }, [scheduleDraw]);
   const limiterStartedAtRef = useRef<number | null>(null);
   const limiterLastHitAtRef = useRef<number | null>(null);
   const limiterClearTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Reset the history buffer when the bar count changes.
   useEffect(() => {
-    const fresh = new Array(bars).fill(0);
-    levelsRef.current = fresh;
-    setLevels(fresh);
-  }, [bars]);
+    setLevels(new Array(bars).fill(0));
+  }, [bars, setLevels]);
 
   useEffect(() => {
     if (!previewMode) return;
-    const level = amplitudeOf(feedRms ?? 0, feedPeak ?? 0);
-    const next = levelsRef.current.slice(1);
-    next.push(level);
-    levelsRef.current = next;
-    setLevels(next);
-  }, [previewMode, feedTick, feedRms, feedPeak]);
+    setLevels(pushLevel(levelsRef.current, amplitudeOf(feedRms ?? 0, feedPeak ?? 0)));
+  }, [previewMode, feedTick, feedRms, feedPeak, setLevels]);
 
   useEffect(() => {
     if (previewMode) return;
     if (!active) {
       lowMonitorRef.current.reset();
       setLowWarning(false);
-      const idle = new Array(bars).fill(0);
-      levelsRef.current = idle;
-      setLevels(idle);
+      setLevels(new Array(bars).fill(0));
       limiterStartedAtRef.current = null;
       limiterLastHitAtRef.current = null;
       setLimiterWarning(false);
@@ -144,11 +177,7 @@ export function LiveAudioVisualizer({
           const payload = event.payload;
           if (payload.source !== source) return;
 
-          const level = amplitudeOf(payload.rms, payload.peak);
-          const next = levelsRef.current.slice(1);
-          next.push(level);
-          levelsRef.current = next;
-          setLevels(next);
+          setLevels(pushLevel(levelsRef.current, amplitudeOf(payload.rms, payload.peak)));
 
           if (source === 'system') {
             // Native recording levels already include system gain. displayGain
@@ -209,7 +238,10 @@ export function LiveAudioVisualizer({
         limiterClearTimerRef.current = null;
       }
     };
-  }, [active, source, bars, previewMode]);
+  }, [active, source, bars, previewMode, setLevels]);
+
+  // Color, gain or fill changed: redraw the current history.
+  useEffect(() => { scheduleDraw(); });
 
   // Your voice in the accent color, everyone else in violet, amber when clipping.
   const barColor = !active
@@ -230,23 +262,12 @@ export function LiveAudioVisualizer({
       aria-label={`${source === 'mic' ? 'Microphone' : 'System'} audio level${warning ? limiterWarning ? '. Too loud.' : '. Very quiet.' : ''}`}
       title={warning ? advice : undefined}
     >
-      {levels.map((level, index) => {
-        const shown = visualLevel(level, displayGain);
-        return (
-        <div
-          key={index}
-          // Full-height bars scaled from the bottom: transform and opacity are
-          // composited, while animating height forced a layout of every bar
-          // ~16 times a second per meter for the whole recording.
-          className={`${fill ? 'flex-1 min-w-[2px]' : 'w-[3px]'} h-full origin-bottom rounded-sm transition-[transform,opacity,background-color] duration-100 ease-out`}
-          style={{
-            backgroundColor: barColor,
-            transform: `scaleY(${Math.max(0.04, shown)})`,
-            opacity: active ? 0.45 + shown * 0.55 : 0.45,
-          }}
-        />
-        );
-      })}
+      <canvas
+        ref={canvasRef}
+        aria-hidden="true"
+        className={`block h-full ${fill ? 'min-w-0 flex-1' : 'shrink-0'}`}
+        style={{ color: barColor, width: fill ? undefined : intrinsicMeterWidth(bars) }}
+      />
       {warning && <span role="status" tabIndex={0} title={advice} aria-label={advice} className="shrink-0 self-center whitespace-nowrap text-[10px] font-medium text-[var(--af-warning)]">
         {limiterWarning ? 'Too loud' : 'Low audio'}
       </span>}
