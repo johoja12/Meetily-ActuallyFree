@@ -29,11 +29,18 @@ cp \
     "$FRONTEND_DIR/src-tauri/binaries/llama-helper-$TARGET"
 chmod +x "$FRONTEND_DIR/src-tauri/binaries/llama-helper-$TARGET"
 
-echo "Building the Apple Silicon DMG..."
+# Release packaging needs the DMG (the default). Local installs can pass
+# MEETILY_MAC_BUNDLES=app to skip the disk-image step.
+BUNDLES="${MEETILY_MAC_BUNDLES:-dmg}"
+echo "Building the Apple Silicon bundle ($BUNDLES)..."
 (
     cd "$FRONTEND_DIR"
-    pnpm exec tauri build --target "$TARGET" --bundles dmg
+    pnpm exec tauri build --target "$TARGET" --bundles "$BUNDLES"
 )
 
 echo "Build complete."
-find "$REPO_DIR/target/$TARGET/release/bundle/dmg" -maxdepth 1 -name "*.dmg" -print
+if [[ "$BUNDLES" == *dmg* ]]; then
+    find "$REPO_DIR/target/$TARGET/release/bundle/dmg" -maxdepth 1 -name "*.dmg" -print
+else
+    find "$REPO_DIR/target/$TARGET/release/bundle/macos" -maxdepth 1 -name "*.app" -print
+fi
