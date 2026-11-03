@@ -1068,7 +1068,7 @@ mod gpu_tests {
         std::env::set_var("MEETILY_PARAKEET_PROFILE", &profile);
         let mut model = ParakeetModel::new_with_backend(path, true, true).expect("load DirectML model");
         model.transcribe_samples(vec![0.0; 32_000], None).expect("transcribe synthetic silence");
-        let written = model.encoder.end_profiling().expect("finish profiling");
+        let written = ParakeetModel::onnx(&mut model.backend).expect("ONNX backend").encoder.end_profiling().expect("finish profiling");
         let events = std::fs::read_to_string(written).expect("read profiling events");
         assert!(events.contains("DmlExecutionProvider"), "No encoder nodes executed on DirectML");
     }
