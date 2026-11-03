@@ -12,7 +12,7 @@
  * emits the completion event that makes the main window save and navigate.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Mic, MicOff, Volume2, VolumeX, Pause, Play, Square, Maximize2 } from 'lucide-react';
@@ -45,6 +45,8 @@ export default function MiniBarPage() {
   // Once stopping begins the timer freezes, even though the bar stays up
   // until the recording is actually finalised.
   const [isStopping, setIsStopping] = useState(false);
+  const stoppingRef = useRef(false);
+  stoppingRef.current = isStopping;
 
   // The window is transparent; the page must not paint a background over it.
   useEffect(() => {
@@ -52,29 +54,52 @@ export default function MiniBarPage() {
     return () => document.documentElement.classList.remove('minibar-window');
   }, []);
 
-  // Rust's RecordingState uses a monotonic Instant. Reading that duration keeps
-  // this separate webview aligned through creation delays, pauses, and duplicate
-  // minimize events instead of accumulating drift in a local +1 counter.
+  // Rust's RecordingState uses a monotonic Instant. Anchoring to that duration
+  // keeps this separate webview aligned through creation delays, pauses, and
+  // duplicate minimize events instead of accumulating drift in a local +1
+  // counter. Between native reads (every 5 s, and on pause/resume) the clock
+  // advances locally from the anchor, so the window does not call into native
+  // twice a second for a whole recording (issue #21).
   useEffect(() => {
     let mounted = true;
+    let anchor: { seconds: number; at: number; running: boolean } | null = null;
+    let tickTimer: number | undefined;
+    const show = () => {
+      if (!anchor || stoppingRef.current) return;
+      const seconds = anchor.running ? anchor.seconds + (performance.now() - anchor.at) / 1000 : anchor.seconds;
+      setElapsed(Math.max(0, Math.floor(seconds)));
+      window.clearTimeout(tickTimer);
+      if (anchor.running) {
+        // Wake just after the next whole second of recording time.
+        const untilNext = (1 - (seconds % 1)) * 1000 + 15;
+        tickTimer = window.setTimeout(show, untilNext);
+      }
+    };
     const syncFromNative = async () => {
       try {
         const state = await recordingService.getRecordingState();
         if (!mounted) return;
         const duration = state.active_duration ?? state.recording_duration;
-        if (duration !== null) setElapsed(Math.max(0, Math.floor(duration)));
+        anchor = duration === null ? null : { seconds: duration, at: performance.now(), running: !state.is_paused };
         setIsPaused(state.is_paused);
         setIsMicMuted(state.is_microphone_muted);
         setIsSystemMuted(state.is_system_audio_muted);
+        show();
       } catch (error) {
         console.error('Compact bar: failed to sync recording state', error);
       }
     };
     void syncFromNative();
-    const id = window.setInterval(syncFromNative, 500);
+    const syncTimer = window.setInterval(syncFromNative, 5_000);
+    const unsubscribes: Array<Promise<() => void>> = [
+      recordingService.onRecordingPaused(() => void syncFromNative()),
+      recordingService.onRecordingResumed(() => void syncFromNative()),
+    ];
     return () => {
       mounted = false;
-      window.clearInterval(id);
+      window.clearInterval(syncTimer);
+      window.clearTimeout(tickTimer);
+      for (const stop of unsubscribes) void stop.then((fn) => fn()).catch(() => {});
     };
   }, []);
 
