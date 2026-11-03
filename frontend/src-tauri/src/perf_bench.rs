@@ -289,3 +289,104 @@ fn room_cleanup() {
         assert_eq!(out.len(), mic.len());
     });
 }
+
+/// DeepFilterNet streamed (libDF, one frame per call) against the batched
+/// graphs in room_cleanup::dfn_batch, on WPE output like production. Needs
+/// MEETILY_DFN_ONNX_TAR (libDF's models/DeepFilterNet3_onnx.tar.gz). Reports
+/// CPU for both and the SNR of batched against streamed output.
+#[test]
+#[ignore]
+fn room_cleanup_dfn_batched() {
+    use crate::audio::room_cleanup::{dfn::StreamingDfn, dfn_batch::{enhance, BatchedDfn, DfnGraphs, OrtDfn}, wpe::{StreamingWpe, WpeConfig}};
+    let mic = load_48k(&env_path("MEETILY_BENCH_MIC").expect("MEETILY_BENCH_MIC"));
+    let tar = std::fs::read(env_path("MEETILY_DFN_ONNX_TAR").expect("MEETILY_DFN_ONNX_TAR")).unwrap();
+    let audio_seconds = mic.len() as f64 / 48_000.0;
+    let mut wpe = StreamingWpe::new(WpeConfig::room_48k());
+    let mut dry = Vec::with_capacity(mic.len());
+    for piece in mic.chunks(48_000) {
+        dry.extend(wpe.push(piece));
+    }
+    dry.extend(wpe.finish());
+
+    let meter = Meter::start();
+    let mut dfn = StreamingDfn::new().unwrap();
+    let mut streamed = Vec::with_capacity(dry.len());
+    for piece in dry.chunks(48_000) {
+        streamed.extend(dfn.push(piece).unwrap());
+    }
+    streamed.extend(dfn.finish().unwrap());
+    meter.report("DeepFilterNet streamed", audio_seconds);
+
+    let graphs = DfnGraphs::from_targz(&tar).unwrap();
+    let backend = std::env::var("MEETILY_DFN_BACKEND").unwrap_or_else(|_| "ort".into());
+    let meter = Meter::start();
+    let mut model: Box<dyn crate::audio::room_cleanup::dfn_batch::BlockModel> = if backend == "tract" {
+        Box::new(BatchedDfn::new(&graphs).unwrap())
+    } else {
+        Box::new(OrtDfn::new(&graphs, 2).unwrap())
+    };
+    meter.report(&format!("DeepFilterNet batched {backend} (load)"), audio_seconds);
+    let meter = Meter::start();
+    let out = enhance(model.as_mut(), &dry).unwrap();
+    meter.report(&format!("DeepFilterNet batched {backend}"), audio_seconds);
+    assert_eq!(out.len(), streamed.len());
+
+    let snr = |a: &[f32], b: &[f32]| {
+        let signal: f64 = a.iter().map(|v| (*v as f64).powi(2)).sum();
+        let noise: f64 = a.iter().zip(b).map(|(x, y)| ((*x - *y) as f64).powi(2)).sum();
+        10.0 * (signal / noise.max(1e-20)).log10()
+    };
+    println!("BENCH batched vs streamed: SNR {:.1} dB over the whole clip", snr(&streamed, &out));
+    // Worst 10 s window, to catch block-boundary or alignment problems.
+    let window = 480_000;
+    let worst = streamed.chunks(window).zip(out.chunks(window)).map(|(a, b)| snr(a, b)).fold(f64::INFINITY, f64::min);
+    println!("BENCH batched vs streamed: worst 10 s window SNR {worst:.1} dB");
+    if let Some(dir) = env_path("MEETILY_BENCH_OUT") {
+        // Raw 48 kHz mono f32 little-endian.
+        let write = |name: &str, x: &[f32]| {
+            std::fs::write(dir.join(name), x.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>()).unwrap();
+        };
+        write("dfn-streamed.f32", &streamed);
+        write("dfn-batched.f32", &out);
+    }
+}
+
+/// Alignment check for dfn_batch: libDF's streamed local SNR per step against
+/// the batched one at frame shifts -4..=4 (the right shift has ~0 error).
+#[test]
+#[ignore]
+fn room_cleanup_dfn_alignment() {
+    use crate::audio::room_cleanup::dfn_batch::{enhance_with_snr, DfnGraphs, OrtDfn};
+    use df::tract::{DfParams, DfTract, ReduceMask, RuntimeParams};
+    let mic = load_48k(&env_path("MEETILY_BENCH_MIC").expect("MEETILY_BENCH_MIC"));
+    let tar = std::fs::read(env_path("MEETILY_DFN_ONNX_TAR").expect("MEETILY_DFN_ONNX_TAR")).unwrap();
+    let input: Vec<f32> = mic.iter().map(|v| v.clamp(-0.9999, 0.9999)).collect();
+    let params = RuntimeParams::default_with_ch(1).with_atten_lim(12.0).with_thresholds(-15.0, 35.0, 35.0).with_mask_reduce(ReduceMask::MAX);
+    let mut model = DfTract::new(DfParams::default(), &params).unwrap();
+    let hop = model.hop_size;
+    let mut noisy = ndarray015::Array2::<f32>::zeros((1, hop));
+    let mut enh = ndarray015::Array2::<f32>::zeros((1, hop));
+    let mut streamed = Vec::new();
+    for frame in input.chunks_exact(hop) {
+        noisy.as_slice_mut().unwrap().copy_from_slice(frame);
+        streamed.push(model.process(noisy.view(), enh.view_mut()).unwrap());
+    }
+    let mut ort = OrtDfn::new(&DfnGraphs::from_targz(&tar).unwrap(), 2).unwrap();
+    let (_, batched) = enhance_with_snr(&mut ort, &input[..streamed.len() * hop]).unwrap();
+    for shift in -4i64..=4 {
+        let pairs: Vec<(f32, f32)> = (0..streamed.len() as i64)
+            .filter_map(|t| { let u = t + shift; (u >= 0 && (u as usize) < batched.len()).then(|| (streamed[t as usize], batched[u as usize])) })
+            .collect();
+        let mean_abs = pairs.iter().map(|(a, b)| (a - b).abs() as f64).sum::<f64>() / pairs.len() as f64;
+        println!("BENCH lsnr shift {shift:+}: mean |streamed - batched| {mean_abs:.3} dB");
+    }
+    for t in [0usize, 1, 2, 3, 4, 5, 8, 12, 20, 30, 50, 80, 120, 200, 400] {
+        println!("BENCH lsnr frame {t}: streamed {:.3} batched {:.3}", streamed[t], batched[t]);
+    }
+    // Error by position within a block, at shift 0: warm-up problems show at the start.
+    let block = crate::audio::room_cleanup::dfn_batch::BLOCK_FRAMES;
+    for (label, range) in [("block frames 0-20", 0..20), ("20-100", 20..100), ("100-300", 100..300), ("300-600", 300..600), ("600-1000", 600..block)] {
+        let errs: Vec<f64> = (0..streamed.len()).filter(|t| range.contains(&(t % block))).map(|t| (streamed[t] - batched[t]).abs() as f64).collect();
+        println!("BENCH lsnr {label}: mean abs error {:.3} dB", errs.iter().sum::<f64>() / errs.len().max(1) as f64);
+    }
+}

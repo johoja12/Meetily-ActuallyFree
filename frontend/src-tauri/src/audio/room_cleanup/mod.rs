@@ -21,6 +21,7 @@
 //! renamed into place only once complete, so a crash never leaves a truncated
 //! copy. At startup it queues every completed room recording that lacks a copy.
 pub mod dfn;
+pub mod dfn_batch;
 pub mod level;
 pub mod wpe;
 
