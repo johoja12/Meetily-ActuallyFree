@@ -4,7 +4,7 @@
 
 use anyhow::{anyhow, Result};
 use log::{debug, error, info, warn};
-use rayon::prelude::*;
+
 use std::borrow::Cow;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -16,7 +16,7 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 
-use super::audio_processing::{audio_to_mono, resample, resample_audio};
+use super::audio_processing::{audio_to_mono, resample_audio, resample_with_progress};
 use super::ffmpeg::find_ffmpeg_path;
 
 /// Extensions requiring ffmpeg pre-conversion (Symphonia lacks these demuxers/codecs)
@@ -70,8 +70,7 @@ impl DecodedAudio {
         // Step 2: Resample to 16kHz if needed
         const WHISPER_SAMPLE_RATE: u32 = 16000;
         if self.sample_rate != WHISPER_SAMPLE_RATE {
-            // Large files are processed in chunks through the sinc resampler
-            // to keep memory bounded while preserving audio quality.
+            // Large files stream through the FFT resampler with progress reports.
             // Linear interpolation (fast_resample) was removed because it lacks
             // an anti-aliasing filter, causing aliasing artifacts that make VAD
             // miss ~99% of speech in long recordings.
@@ -79,7 +78,7 @@ impl DecodedAudio {
 
             let mut resampled = if mono_samples.len() > LARGE_FILE_THRESHOLD {
                 info!(
-                    "Chunked sinc resampling {} samples from {}Hz to {}Hz (large file mode)",
+                    "Streaming FFT resampling {} samples from {}Hz to {}Hz (large file mode)",
                     mono_samples.len(),
                     self.sample_rate,
                     WHISPER_SAMPLE_RATE
@@ -95,7 +94,7 @@ impl DecodedAudio {
                 resample_audio(&mono_samples, self.sample_rate, WHISPER_SAMPLE_RATE)
             };
 
-            // Clamp after resampling: the sinc resampler can overshoot
+            // Clamp after resampling: band-limited resampling can overshoot
             // slightly beyond [-1.0, 1.0] (Gibbs phenomenon), which causes
             // VAD to reject samples with "Float sample must be in the range -1.0 to 1.0"
             for s in &mut resampled {
@@ -108,21 +107,11 @@ impl DecodedAudio {
     }
 }
 
-/// Resample large audio files in fixed-size chunks through the sinc resampler.
-///
-/// Processes `input` in 60-second chunks using the high-quality sinc resampler
-/// from [`resample_audio`], concatenating the results. This avoids the memory
-/// spike of resampling the entire file at once while preserving anti-aliasing
-/// quality that is critical for downstream VAD accuracy.
-///
-/// Chunked resampling with optional progress callback.
-///
-/// Resamples `input` in parallel 60-second chunks via [`rayon`], then merges
-/// the results sequentially with a 100ms cross-fade to eliminate discontinuities
-/// at chunk boundaries. Each chunk's [`resample`] call is independent and
-/// CPU-bound, making this ideal for data parallelism.
-///
-/// Falls back to [`resample_audio`] (single-pass sinc) if any chunk fails.
+/// Resample a large file in one streaming pass of the FFT resampler
+/// ([`resample_with_progress`]), reporting progress about once a minute of
+/// audio. Memory stays bounded (the resampler holds one block); there are no
+/// chunk seams to cross-fade. Falls back to returning the input unchanged only
+/// if the resampler cannot be built, as [`resample_audio`] does.
 fn chunked_resample_with_progress(
     input: &[f32],
     from_rate: u32,
@@ -132,99 +121,22 @@ fn chunked_resample_with_progress(
     if input.is_empty() || from_rate == to_rate {
         return input.to_vec();
     }
-
-    // 60 seconds of audio at the source sample rate per chunk
-    let chunk_samples = from_rate as usize * 60;
-    // 100ms overlap in the input domain to cross-fade between chunks
-    let overlap_input = from_rate as usize / 10;
-    let ratio = to_rate as f64 / from_rate as f64;
-    let overlap_output = (overlap_input as f64 * ratio) as usize;
-    let estimated_output = (input.len() as f64 * ratio) as usize + 1024;
-
-    // Build overlapping chunk boundaries
-    let mut chunk_ranges: Vec<(usize, usize)> = Vec::new();
-    let mut start = 0usize;
-    while start < input.len() {
-        let end = (start + chunk_samples + overlap_input).min(input.len());
-        chunk_ranges.push((start, end));
-        start += chunk_samples;
-    }
-
-    let total_chunks = chunk_ranges.len();
-    info!(
-        "Parallel chunked sinc resampling: {} chunks of ~60s each with 100ms cross-fade ({} total samples)",
-        total_chunks,
-        input.len()
-    );
-
-    // Resample all chunks in parallel — each is independent and CPU-bound
-    let resampled_chunks: Vec<Result<Vec<f32>>> = chunk_ranges
-        .par_iter()
-        .map(|&(chunk_start, chunk_end)| {
-            let chunk = &input[chunk_start..chunk_end];
-            resample(chunk, from_rate, to_rate)
-        })
-        .collect();
-
-    // Merge sequentially with cross-fade (order-dependent, must be serial)
-    let mut output = Vec::with_capacity(estimated_output);
-    for (chunk_idx, result) in resampled_chunks.into_iter().enumerate() {
-        match result {
-            Ok(resampled) => {
-                if chunk_idx == 0 {
-                    output.extend_from_slice(&resampled);
-                } else {
-                    // Cross-fade the overlap region with the tail of the previous output
-                    let fade_len = overlap_output.min(resampled.len()).min(output.len());
-                    if fade_len > 0 {
-                        let out_start = output.len() - fade_len;
-                        for i in 0..fade_len {
-                            let t = i as f32 / fade_len as f32;
-                            output[out_start + i] =
-                                output[out_start + i] * (1.0 - t) + resampled[i] * t;
-                        }
-                        if fade_len < resampled.len() {
-                            output.extend_from_slice(&resampled[fade_len..]);
-                        }
-                    } else {
-                        output.extend_from_slice(&resampled);
-                    }
-                }
-            }
-            Err(e) => {
-                warn!(
-                    "Resampling failed on chunk {}/{}: {}, falling back to single-pass sinc resampler",
-                    chunk_idx + 1,
-                    total_chunks,
-                    e
-                );
-                return resample_audio(input, from_rate, to_rate);
-            }
-        }
-
+    let result = resample_with_progress(input, from_rate, to_rate, |fraction| {
         if let Some(callback) = &progress_callback {
-            let progress_pct = ((chunk_idx + 1) as f64 / total_chunks as f64) * 100.0;
-            if (chunk_idx + 1) % 10 == 0 || chunk_idx + 1 == total_chunks {
-                info!(
-                    "Resampling progress: {}/{} chunks ({:.0}%)",
-                    chunk_idx + 1,
-                    total_chunks,
-                    progress_pct
-                );
-            }
-            callback(
-                progress_pct as u32,
-                &format!("Resampling audio: {:.0}%", progress_pct),
-            );
+            let pct = (fraction * 100.0).min(100.0);
+            callback(pct as u32, &format!("Resampling audio: {:.0}%", pct));
+        }
+    });
+    match result {
+        Ok(output) => {
+            info!("Streaming FFT resampling complete: {} -> {} samples", input.len(), output.len());
+            output
+        }
+        Err(e) => {
+            warn!("Resampling failed: {e}; using single-pass fallback");
+            resample_audio(input, from_rate, to_rate)
         }
     }
-
-    info!(
-        "Parallel chunked sinc resampling complete: {} -> {} samples",
-        input.len(),
-        output.len()
-    );
-    output
 }
 
 /// Normalize audio samples to the valid range (-1.0 to 1.0)
