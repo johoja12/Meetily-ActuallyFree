@@ -105,8 +105,10 @@ Chain (input `mic.mp4`, which in room mode is the whole meeting; 48 kHz mono):
 
 Lifecycle: the worker is started from app setup and owns all processing, so a
 job does not depend on any window. It runs at background QoS (macOS) / lowest
-thread priority (Windows) with a two-thread pool, waits while a recording is
-active and for 60 s afterwards, polls `is_recording_active` once per second of
+thread priority (Windows) with a two-thread pool, and its FFmpeg processes in
+the Darwin background class. It starts a job only after 60 s with no recording,
+transcript re-run, import, speaker identification or voice learning (so it no
+longer overlaps post-call work), polls `is_recording_active` once per second of
 audio and abandons the job (deleting the partial file) when capture starts, then
 retries it. At startup it queues every completed room recording in the database
 without a copy, newest first. A failed job is logged and retried on the next
