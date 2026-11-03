@@ -64,6 +64,13 @@ pub struct DeviceInfo {
     pub system_audio: Option<String>,
 }
 
+const TRANSCRIPT_WRITE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// The first segment is written at once, later ones once the interval has passed.
+fn transcript_write_due(last: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    last.map_or(true, |last| now.saturating_duration_since(last) >= TRANSCRIPT_WRITE_INTERVAL)
+}
+
 /// New recording saver using incremental saving strategy.
 /// Writes three tracks when auto-save is on:
 ///   - `audio.mp4`  mixed playback
@@ -83,6 +90,8 @@ pub struct RecordingSaver {
     meeting_name: Option<String>,
     metadata: Option<MeetingMetadata>,
     transcript_segments: Arc<Mutex<Vec<TranscriptSegment>>>,
+    /// When transcripts.json was last rewritten during the recording.
+    last_transcript_write: Mutex<Option<std::time::Instant>>,
     chunk_receiver: Option<mpsc::UnboundedReceiver<AudioChunk>>,
     is_saving: Arc<Mutex<bool>>,
     accumulation_handle: Option<tokio::task::JoinHandle<()>>,
@@ -101,6 +110,7 @@ impl RecordingSaver {
             meeting_name: None,
             metadata: None,
             transcript_segments: Arc::new(Mutex::new(Vec::new())),
+            last_transcript_write: Mutex::new(None),
             chunk_receiver: None,
             is_saving: Arc::new(Mutex::new(false)),
             accumulation_handle: None,
@@ -137,12 +147,26 @@ impl RecordingSaver {
     }
 
     /// Add or update a structured transcript segment (upserts based on sequence_id)
-    /// Also saves incrementally to disk
+    /// and save transcripts.json incrementally, at most every
+    /// TRANSCRIPT_WRITE_INTERVAL. Each save rewrites the whole file (and a
+    /// cloud-synced recordings folder uploads it again), so writing after
+    /// every segment did ~11 full rewrites a minute (issue #23). Stopping
+    /// always writes the final file; until then the window's own copy covers
+    /// a crash.
     pub fn add_transcript_segment(&self, segment: TranscriptSegment) {
         Self::upsert_transcript_segment(&self.transcript_segments, segment);
 
-        // NEW: Save incrementally to disk
-        if let Some(folder) = &self.meeting_folder {
+        let Some(folder) = &self.meeting_folder else { return };
+        let now = std::time::Instant::now();
+        let due = match self.last_transcript_write.lock() {
+            Ok(mut last) => {
+                let due = transcript_write_due(*last, now);
+                if due { *last = Some(now); }
+                due
+            }
+            Err(_) => true,
+        };
+        if due {
             if let Err(e) = self.write_transcripts_json(folder) {
                 warn!("Failed to write incremental transcript update: {}", e);
             }
@@ -625,6 +649,14 @@ fn initial_metadata(meeting_name: &str, create_checkpoints: bool, room_microphon
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transcript_file_is_rewritten_at_most_every_interval() {
+        let start = std::time::Instant::now();
+        assert!(transcript_write_due(None, start));
+        assert!(!transcript_write_due(Some(start), start + std::time::Duration::from_secs(14)));
+        assert!(transcript_write_due(Some(start), start + TRANSCRIPT_WRITE_INTERVAL));
+    }
 
     #[test]
     fn room_microphone_metadata_is_written_before_capture_and_defaults_for_old_meetings() {
