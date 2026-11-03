@@ -321,7 +321,8 @@ fn app_busy() -> bool {
         || crate::diarization::voice_learning::get_voice_learning_running()
 }
 
-fn wait_until_idle() {
+/// Block until the app has had no recording or post-call work for a minute.
+pub(crate) fn wait_until_idle() {
     let mut idle_since: Option<Instant> = None;
     loop {
         if app_busy() {

@@ -375,6 +375,20 @@ holding the Nemotron model operation so it cannot race a Settings download or
 uninstall), then loads both models once so CoreML compiles them before a
 recording waits on it. Uninstall removes the `nemotron3-coreml` folder.
 
+**macOS Whisper runs its encoder on the Neural Engine** when whisper.cpp's
+published CoreML conversion sits next to the model
+(`ggml-large-v3-turbo-encoder.mlmodelc`; whisper-rs is built with CoreML and
+fallback, so without the folder both halves run on Metal).
+`whisper_engine/coreml_encoder.rs` fetches the pinned zip (`ggerganov/whisper.cpp`
+at `REVISION`, SHA-256 checked) at launch and after a Whisper download for each
+installed model with a published encoder (large-v3-turbo today), unpacks it via a
+staging folder renamed into place, and compiles it once after a minute of idle
+(marker `.meetily-compiled`). Deleting the last variant of a model removes its
+encoder. `WhisperEngine::batch_state` reuses one decoder state across batch
+windows, since whisper.cpp loads the encoder whenever a state is created. 27 min
+room meeting on an M4: post-call Whisper 110 s on Metal, 58 s with the encoder,
+same words (`perf_bench::post_call`; install test `coreml_encoder::install_tests`).
+
 **macOS Parakeet uses CoreML by default** for the v3 model: `ParakeetModel::new`
 selects the pinned conversion (`FluidInference/parakeet-tdt-0.6b-v3-coreml` at
 `parakeet_engine/coreml.rs` `REVISION`, CC-BY-4.0, folder

@@ -1,4 +1,6 @@
 pub mod whisper_engine;
+#[cfg(target_os = "macos")]
+pub mod coreml_encoder;
 pub mod labs;
 pub mod acceleration;
 pub mod commands;
