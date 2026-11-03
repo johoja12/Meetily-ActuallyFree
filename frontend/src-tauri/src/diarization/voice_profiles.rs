@@ -184,6 +184,39 @@ struct LiveMatcher {
     models: DiarizationModels,
     profiles: Vec<VoiceProfile>,
     names: HashMap<String, String>,
+    checks: HashMap<String, ChannelChecks>,
+}
+
+/// Embedding a turn (WeSpeaker on the CPU) costs about as much as all the rest
+/// of a room recording's live work together: measured at 15% of one core
+/// during a real meeting when every 2-15 s turn was embedded (issue #23).
+/// Most of those embeddings repeated a settled answer, so each meeting-local
+/// channel gets a few immediate checks and then a periodic one.
+const EAGER_CHECKS: u32 = 4;
+/// Unnamed channels (often a guest with no saved voice) keep trying, slowly.
+const UNNAMED_RECHECK: std::time::Duration = std::time::Duration::from_secs(30);
+/// A named channel is re-checked in case Nemotron reuses it for someone else.
+const NAMED_RECHECK: std::time::Duration = std::time::Duration::from_secs(60);
+
+#[derive(Debug, Default, Clone, Copy)]
+struct ChannelChecks {
+    attempts: u32,
+    last: Option<std::time::Instant>,
+}
+
+impl ChannelChecks {
+    /// Whether an eligible turn on this channel should be embedded now.
+    fn due(&self, named: bool, now: std::time::Instant) -> bool {
+        let Some(last) = self.last else { return true };
+        if !named && self.attempts < EAGER_CHECKS { return true; }
+        let wait = if named { NAMED_RECHECK } else { UNNAMED_RECHECK };
+        now.saturating_duration_since(last) >= wait
+    }
+
+    fn record(&mut self, now: std::time::Instant) {
+        self.attempts += 1;
+        self.last = Some(now);
+    }
 }
 
 /// Identity matching supplements Nemotron's meeting-local channels; it does not
@@ -195,7 +228,7 @@ pub fn start_live_matcher() -> Result<()> {
     let profiles = load_for_matching()?;
     if profiles.is_empty() { return Ok(()); }
     let models = DiarizationModels::load(&super::diarization_model_dir())?;
-    *guard = Some(LiveMatcher { models, profiles, names: HashMap::new() });
+    *guard = Some(LiveMatcher { models, profiles, names: HashMap::new(), checks: HashMap::new() });
     Ok(())
 }
 
@@ -210,7 +243,10 @@ pub fn name_live_nemotron_turn(label: &str, samples: &[f32]) -> Option<String> {
     let matcher = guard.as_mut()?;
     // Short VAD fragments are poor enrollment comparisons. A verified earlier
     // match for this meeting-local channel can still label them.
-    if samples.len() >= 32_000 && samples.len() <= 240_000 {
+    let now = std::time::Instant::now();
+    let checks = matcher.checks.entry(label.to_string()).or_default();
+    if samples.len() >= 32_000 && samples.len() <= 240_000 && checks.due(matcher.names.contains_key(label), now) {
+        checks.record(now);
         if let Ok(embedding) = matcher.models.embed(samples) {
             if let Some(profile) = best_match(&embedding, &matcher.profiles) {
                 matcher.names.insert(label.to_string(), profile.name.clone());
@@ -1110,6 +1146,27 @@ mod candidate_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_checks_are_eager_then_periodic() {
+        let start = std::time::Instant::now();
+        let at = |s: u64| start + std::time::Duration::from_secs(s);
+        let mut checks = ChannelChecks::default();
+        // An unnamed channel is checked on its first EAGER_CHECKS turns.
+        for turn in 0..EAGER_CHECKS {
+            assert!(checks.due(false, at(turn as u64)));
+            checks.record(at(turn as u64));
+        }
+        // Then once per UNNAMED_RECHECK.
+        let last = EAGER_CHECKS as u64 - 1;
+        assert!(!checks.due(false, at(last + 29)));
+        assert!(checks.due(false, at(last + 30)));
+        // A named channel waits NAMED_RECHECK after its last check, even early on.
+        let mut named = ChannelChecks::default();
+        named.record(at(0));
+        assert!(!named.due(true, at(59)));
+        assert!(named.due(true, at(60)));
+    }
 
     /// Real audio for "Your voice": learn from one microphone recording, then
     /// check it names you in another and does not name someone else. Fixtures
