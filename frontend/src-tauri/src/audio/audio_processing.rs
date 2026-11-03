@@ -175,7 +175,11 @@ impl LoudnessNormalizer {
         const TRUE_PEAK_LIMIT: f64 = -1.0;
         const ANALYZE_CHUNK_SIZE: usize = 512;
 
-        let ebur128 = ebur128::EbuR128::new(channels, sample_rate, ebur128::Mode::I | ebur128::Mode::TRUE_PEAK)
+        // Integrated loudness only: true peak (4x oversampling per sample) was
+        // computed but never read, and histogram mode keeps loudness_global()
+        // O(1) instead of rescanning every 100 ms block of the meeting at each
+        // of its ~94 queries per second, a cost that grew with meeting length.
+        let ebur128 = ebur128::EbuR128::new(channels, sample_rate, ebur128::Mode::I | ebur128::Mode::HISTOGRAM)
             .map_err(|e| anyhow::anyhow!("Failed to create EBU R128 normalizer: {}", e))?;
 
         let true_peak_limit = 10_f32.powf(TRUE_PEAK_LIMIT as f32 / 20.0);
