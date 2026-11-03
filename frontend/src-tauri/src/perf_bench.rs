@@ -7,8 +7,8 @@
 //!
 //! Inputs (environment):
 //! - `MEETILY_BENCH_MIC`: microphone recording (any decodable file).
-//! - `MEETILY_BENCH_SYSTEM`: optional computer-audio recording; enables echo
-//!   cancellation and the second VAD, as in personal-microphone mode.
+//! - `MEETILY_BENCH_SYSTEM`: optional computer-audio recording (or `silence`);
+//!   enables echo cancellation and the second VAD, as in personal-microphone mode.
 //! - `MEETILY_BENCH_SECONDS`: audio length to use (default 600).
 //! - `MEETILY_BENCH_SEGMENTS`: file the pipeline bench writes its speech
 //!   segments to and the Parakeet bench reads.
@@ -109,7 +109,11 @@ fn read_segments(path: &PathBuf) -> Vec<(f64, Vec<f32>)> {
 fn live_pipeline() {
     let mic_path = env_path("MEETILY_BENCH_MIC").expect("MEETILY_BENCH_MIC");
     let mic = load_48k(&mic_path);
-    let system = env_path("MEETILY_BENCH_SYSTEM").map(|p| load_48k(&p));
+    // "silence": a system track that is present but silent (headphones, or the
+    // other side listening).
+    let system = env_path("MEETILY_BENCH_SYSTEM").map(|p| {
+        if p.as_os_str() == "silence" { vec![0.0; mic.len()] } else { load_48k(&p) }
+    });
     let audio_seconds = mic.len() as f64 / 48_000.0;
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     let segments = runtime.block_on(async move {
@@ -164,7 +168,8 @@ fn live_pipeline() {
         drain_tracks.await.unwrap();
         let levels = drain_levels.await.unwrap();
         let segments = collect.await.unwrap();
-        meter.report(if system_name == "system" { "live pipeline (mic + system)" } else { "live pipeline (room mic)" }, audio_seconds);
+        let label = match std::env::var("MEETILY_BENCH_SYSTEM").as_deref() { Ok("silence") => "live pipeline (mic + silent system)", Ok(_) => "live pipeline (mic + system)", Err(_) => "live pipeline (room mic)" };
+        meter.report(label, audio_seconds);
         println!("BENCH   {} speech segments, {} level updates ({:.1}/s of audio)", segments.len(), levels, levels as f64 / audio_seconds);
         segments
     });
@@ -226,5 +231,61 @@ fn post_call() {
         meter.report(&format!("post-call Whisper ({} rows)", out.len()), audio_seconds);
         let words: usize = out.iter().map(|t| t.text.split_whitespace().count()).sum();
         println!("BENCH   {words} words");
+    });
+}
+
+/// Live Nemotron speaker labeling on CoreML (the room-mode live path), fed
+/// 50 ms of 16 kHz audio at a time like the production worker.
+/// `MEETILY_BENCH_NEMOTRON_DIR`: the `nemotron3-coreml` folder.
+#[test]
+#[ignore]
+fn live_nemotron() {
+    let mic = load_48k(&env_path("MEETILY_BENCH_MIC").expect("MEETILY_BENCH_MIC"));
+    let audio = crate::audio::audio_processing::resample_audio(&mic, 48_000, 16_000);
+    let dir = env_path("MEETILY_BENCH_NEMOTRON_DIR").expect("MEETILY_BENCH_NEMOTRON_DIR");
+    let mut model = crate::diarization::nemotron::NemotronDiarizationModel::coreml(&dir, 0.5, true).expect("load Nemotron");
+    let _ = model.feed(&vec![0.0; 16_000]);
+    let meter = Meter::start();
+    let mut segments = 0;
+    for samples in audio.chunks(800) {
+        segments += model.feed(samples).unwrap().len();
+    }
+    segments += model.flush().unwrap().len();
+    meter.report(&format!("live Nemotron CoreML ({segments} segments)"), audio.len() as f64 / 16_000.0);
+}
+
+/// Room playback cleanup stages on the room microphone: WPE, DeepFilterNet
+/// and level matching (the FFmpeg decode/encode run as separate processes and
+/// are not counted). Uses a two-thread pool like the production worker.
+#[test]
+#[ignore]
+fn room_cleanup() {
+    use crate::audio::room_cleanup::{dfn::StreamingDfn, level::LevelMatch, wpe::{StreamingWpe, WpeConfig}};
+    let mic = load_48k(&env_path("MEETILY_BENCH_MIC").expect("MEETILY_BENCH_MIC"));
+    let audio_seconds = mic.len() as f64 / 48_000.0;
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+    pool.install(|| {
+        let meter = Meter::start();
+        let mut wpe = StreamingWpe::new(WpeConfig::room_48k());
+        let mut dry = Vec::with_capacity(mic.len());
+        for piece in mic.chunks(48_000) {
+            dry.extend(wpe.push(piece));
+        }
+        dry.extend(wpe.finish());
+        meter.report("room cleanup WPE", audio_seconds);
+        let meter = Meter::start();
+        let mut dfn = StreamingDfn::new().unwrap();
+        let mut enhanced = Vec::with_capacity(dry.len());
+        for piece in dry.chunks(48_000) {
+            enhanced.extend(dfn.push(piece).unwrap());
+        }
+        enhanced.extend(dfn.finish().unwrap());
+        meter.report("room cleanup DeepFilterNet", audio_seconds);
+        let meter = Meter::start();
+        let mut level = LevelMatch::new();
+        level.push_input(&mic);
+        let out = level.process(&enhanced);
+        meter.report("room cleanup level match", audio_seconds);
+        assert_eq!(out.len(), mic.len());
     });
 }

@@ -327,24 +327,62 @@ fn fir() -> [f32; FIR_TAPS] {
 }
 
 /// FIR filter state: the last `FIR_TAPS` inputs, newest last.
+///
+/// The history is written twice into a buffer of `2 * FIR_TAPS`, so the last
+/// `FIR_TAPS` inputs are always one contiguous slice (oldest first) and the
+/// output is a straight dot product with the reversed taps, which the compiler
+/// vectorizes. (A `VecDeque` walked in reverse per sample cost several times
+/// more on the 48 kHz paths.)
 struct Fir {
-    h: [f32; FIR_TAPS],
-    history: VecDeque<f32>,
+    /// Taps reversed: `reversed[i]` weighs the i-th oldest input.
+    reversed: [f32; FIR_TAPS],
+    buffer: [f32; 2 * FIR_TAPS],
+    /// Index of the newest input in the first half.
+    newest: usize,
 }
 
 impl Fir {
     fn new() -> Self {
-        Self { h: fir(), history: std::iter::repeat(0.0).take(FIR_TAPS).collect() }
+        let mut reversed = fir();
+        reversed.reverse();
+        Self { reversed, buffer: [0.0; 2 * FIR_TAPS], newest: FIR_TAPS - 1 }
     }
 
     fn push(&mut self, x: f32) {
-        self.history.pop_front();
-        self.history.push_back(x);
+        self.newest = (self.newest + 1) % FIR_TAPS;
+        self.buffer[self.newest] = x;
+        self.buffer[self.newest + FIR_TAPS] = x;
+    }
+
+    /// The last `FIR_TAPS` inputs, oldest first.
+    fn window(&self) -> &[f32] {
+        &self.buffer[self.newest + 1..self.newest + 1 + FIR_TAPS]
+    }
+
+    fn oldest(&self) -> f32 {
+        self.window()[0]
     }
 
     fn output(&self) -> f32 {
-        self.history.iter().rev().zip(&self.h).map(|(a, b)| a * b).sum()
+        dot(self.window(), &self.reversed)
     }
+}
+
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    // Eight independent partial sums so the loop vectorizes despite
+    // floating-point ordering.
+    let mut acc = [0.0f32; 8];
+    let chunks = a.len() / 8;
+    for c in 0..chunks {
+        for l in 0..8 {
+            acc[l] += a[c * 8 + l] * b[c * 8 + l];
+        }
+    }
+    let mut sum: f32 = acc.iter().sum();
+    for i in chunks * 8..a.len() {
+        sum += a[i] * b[i];
+    }
+    sum
 }
 
 /// 48 kHz → 16 kHz. Output k is the filtered input at 3k, so 16 kHz sample m
@@ -372,22 +410,38 @@ impl Decimator {
     }
 }
 
-/// 16 kHz → 48 kHz (zero-stuffing and the same low-pass, gain 3).
+/// 16 kHz → 48 kHz (zero-stuffing and the same low-pass, gain 3), computed
+/// polyphase: output phase p of each input only multiplies the taps that land
+/// on real samples (h[p], h[p + 3], ...), a third of the zero-stuffed work.
 struct Interpolator {
-    fir: Fir,
+    /// Per phase, taps reversed to pair with the input history oldest first.
+    phases: [Vec<f32>; 3],
+    history: Vec<f32>,
 }
 
 impl Interpolator {
+    /// Inputs per phase: ceil(FIR_TAPS / 3).
+    const LEN: usize = FIR_TAPS.div_ceil(3);
+
     fn new() -> Self {
-        Self { fir: Fir::new() }
+        let h = fir();
+        let phase = |p: usize| -> Vec<f32> {
+            // Output at stuffed position n (phase p after input x_j) sums
+            // h[p + 3k] * 3 x_{j-k}; zero-pad to LEN taps.
+            let mut taps: Vec<f32> = (0..Self::LEN).map(|k| h.get(p + 3 * k).copied().unwrap_or(0.0) * 3.0).collect();
+            taps.reverse();
+            taps
+        };
+        Self { phases: [phase(0), phase(1), phase(2)], history: vec![0.0; Self::LEN] }
     }
 
     fn process(&mut self, input: &[f32]) -> Vec<f32> {
         let mut out = Vec::with_capacity(input.len() * 3);
         for &x in input {
-            for stuffed in [3.0 * x, 0.0, 0.0] {
-                self.fir.push(stuffed);
-                out.push(self.fir.output());
+            self.history.remove(0);
+            self.history.push(x);
+            for taps in &self.phases {
+                out.push(dot(&self.history, taps));
             }
         }
         out
@@ -420,7 +474,7 @@ impl BandSplit {
             low.push(self.second.output());
             // The oldest input in the first filter's history, FIR_TAPS - 1 =
             // `DELAY` samples ago.
-            delayed.push(self.first.history[0]);
+            delayed.push(self.first.oldest());
         }
         (delayed, low)
     }
@@ -504,6 +558,10 @@ impl LagEstimator {
     }
 
     fn estimate(&mut self) -> Option<i64> {
+        // A silent reference has no echo to locate; skip the FFTs.
+        if self.reference.iter().all(|x| x.abs() < 1e-3) {
+            return None;
+        }
         let n = 2 * LAG_WINDOW;
         let fft = self.planner.plan_fft_forward(n);
         let ifft = self.planner.plan_fft_inverse(n);
@@ -533,6 +591,23 @@ impl LagEstimator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fast_filters_match_direct_convolution() {
+        let h = fir();
+        let input: Vec<f32> = (0..2_000).map(|i| ((i * 7919 % 1000) as f32 / 500.0) - 1.0).collect();
+        let at = |x: &[f32], n: isize| if n >= 0 && (n as usize) < x.len() { x[n as usize] } else { 0.0 };
+        // Interpolator == zero-stuffing then the FIR (gain 3).
+        let stuffed: Vec<f32> = input.iter().flat_map(|&x| [3.0 * x, 0.0, 0.0]).collect();
+        let expected: Vec<f32> = (0..stuffed.len()).map(|n| (0..FIR_TAPS).map(|k| h[k] * at(&stuffed, n as isize - k as isize)).sum()).collect();
+        let got = Interpolator::new().process(&input);
+        assert_eq!(got.len(), expected.len());
+        assert!(got.iter().zip(&expected).all(|(a, b)| (a - b).abs() < 1e-5));
+        // Decimator == the FIR sampled at every third input.
+        let filtered: Vec<f32> = (0..input.len()).map(|n| (0..FIR_TAPS).map(|k| h[k] * at(&input, n as isize - k as isize)).sum()).collect();
+        let got = Decimator::new().process(&input);
+        assert!(got.iter().zip(filtered.iter().step_by(3)).all(|(a, b)| (a - b).abs() < 1e-5));
+    }
 
     const LEAD: usize = 48_000 * LEAD_MS / 1000;
 
