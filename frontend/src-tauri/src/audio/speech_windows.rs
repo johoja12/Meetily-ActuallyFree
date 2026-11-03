@@ -87,10 +87,14 @@ pub const WHISPER_WINDOW_SAMPLES: usize = 25 * 16_000;
 pub const WHISPER_WINDOW_MAX_GAP_MS: f64 = 1_500.0;
 /// Trailing silence so whisper.cpp still decodes a short final utterance.
 const WHISPER_TRAILING_PAD_SAMPLES: usize = 16_000;
-/// Beam search: greedy was no faster on Metal (the encoder dominates) and
-/// hallucinated more on a real meeting (issue #14).
+/// Greedy. Until issue #22 both settings actually decoded with one beam at
+/// temperature 0.2 (whisper.cpp ignores the beam size above temperature 0),
+/// so the comparison in issue #14 measured noise. With real beam search, on
+/// three AMI far-field test meetings (55 min, manual transcripts) WER was
+/// greedy 31.8%, beam 3 32.2%, beam 5 34.1%, and the old setting 31.8%;
+/// beam 3 and 5 took 21-58% longer than greedy (M4, CoreML encoder).
 pub const WHISPER_BATCH_DECODING: crate::whisper_engine::BatchDecoding =
-    crate::whisper_engine::BatchDecoding::Beam;
+    crate::whisper_engine::BatchDecoding::Greedy;
 
 /// RMS and peak of 16 kHz samples.
 pub fn signal_level(samples: &[f32]) -> (f32, f32) {

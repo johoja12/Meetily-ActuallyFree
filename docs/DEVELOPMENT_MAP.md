@@ -305,7 +305,14 @@ Parakeet still runs per segment. Measured on a 19.4 min room-mic meeting
 (M4, large-v3-turbo-q5_0, Metal): 259-274 s per segment vs 87-95 s packed;
 the two transcripts differ by ~14% of words with no clear winner (packing
 recovers speech the per-segment run dropped, and misses some words it had).
-Greedy decoding was no faster and hallucinated more, so beam search stays.
+Batch windows decode greedily at temperature 0 (`WHISPER_BATCH_DECODING`).
+whisper.cpp only runs more than one beam at temperature 0, and batch runs used
+to start at the hardware profile's 0.1-0.4, so "beam search" was one beam and
+the earlier greedy comparison measured nothing. With real beam search, on
+three AMI far-field test meetings (55 min, manual transcripts, Whisper's
+English normalizer) WER was greedy 31.8%, beam 3 32.2%, beam 5 34.1%, the old
+setting 31.8%; beam took 21-58% longer (issue #22). `frontend/scripts/asr-eval/`
+fetches the AMI references and scores the bench output (`MEETILY_BENCH_OUT`).
 The benchmark is the ignored test `speech_windows::bench::bench`, which reads
 a local recording from `MEETILY_BENCH_AUDIO`. Related
 speaker/retranscription dialogs. `useDiarizationEngine.ts` refreshes selected-engine

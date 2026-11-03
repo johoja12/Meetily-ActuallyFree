@@ -20,9 +20,9 @@ const TIMED_SEGMENT_MAX_CHARS: i32 = 120;
 /// Decoding for batch (after-the-call) Whisper runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchDecoding {
-    /// Beam search with the hardware profile's beam size.
+    /// Beam search with the hardware profile's beam size (temperature 0).
     Beam,
-    /// One candidate per step: much less CPU work in the sampler.
+    /// One candidate per step (temperature 0).
     Greedy,
 }
 
@@ -733,7 +733,12 @@ impl WhisperEngine {
         params.set_print_timestamps(false);
         params.set_suppress_blank(true);
         params.set_suppress_non_speech_tokens(true);
-        params.set_temperature(adaptive_config.temperature);
+        // First pass at temperature 0, falling back in steps of 0.2 when a
+        // window fails the entropy/log-probability checks (whisper.cpp's
+        // default schedule). This used to start at the hardware profile's
+        // 0.1-0.4, where whisper.cpp runs a single decoder whatever the
+        // strategy, so `Beam` never searched more than one beam (issue #22).
+        params.set_temperature(0.0);
         params.set_entropy_thold(2.4);
         params.set_logprob_thold(-1.0);
         params.set_no_speech_thold(if super::labs::strict_silence_enabled() { 0.45 } else { 0.55 });
