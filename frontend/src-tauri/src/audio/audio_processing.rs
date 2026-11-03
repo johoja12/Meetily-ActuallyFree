@@ -3,9 +3,6 @@ use chrono::Utc;
 use log::{debug, info, warn};
 use realfft::num_complex::{Complex32, ComplexFloat};
 use realfft::RealFftPlanner;
-use rubato::{
-    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
-};
 use std::path::PathBuf;
 use nnnoiseless::DenoiseState;
 
@@ -566,99 +563,50 @@ pub fn audio_to_mono(audio: &[f32], channels: u16) -> Vec<f32> {
     mono_samples
 }
 
-/// High-quality audio resampling with adaptive parameters based on sample rate ratio
+/// Resample a whole buffer between fixed rates.
 ///
-/// This function automatically selects the best resampling parameters based on:
-/// - Sample rate ratio (upsampling vs downsampling)
-/// - Quality requirements (integer ratios get optimized paths)
-/// - Anti-aliasing needs
+/// rubato's FFT resampler with its delay compensated (the capture path's
+/// `CaptureResampler`, issue #16): output sample n corresponds to input time
+/// n / to_rate, and the length is round(len * ratio). It replaced a 512-tap
+/// cubic sinc that post-call decoding ran on every core, several times per
+/// recording; that sinc also never compensated its own delay.
 ///
 /// Supports all common sample rates: 8kHz, 16kHz, 24kHz, 44.1kHz, 48kHz, etc.
 pub fn resample(input: &[f32], from_sample_rate: u32, to_sample_rate: u32) -> Result<Vec<f32>> {
+    resample_with_progress(input, from_sample_rate, to_sample_rate, |_| {})
+}
+
+/// [`resample`], reporting the fraction of input consumed (0.0..=1.0) about
+/// every 60 s of audio.
+pub fn resample_with_progress(
+    input: &[f32],
+    from_sample_rate: u32,
+    to_sample_rate: u32,
+    mut progress: impl FnMut(f64),
+) -> Result<Vec<f32>> {
     if input.is_empty() {
         return Ok(Vec::new());
     }
-
-    // Fast path: No resampling needed
     if from_sample_rate == to_sample_rate {
         return Ok(input.to_vec());
     }
-
+    let mut resampler = super::pipeline::CaptureResampler::new(from_sample_rate, to_sample_rate, 1024)
+        .map_err(|e| anyhow::anyhow!("Resampler setup failed: {e}"))?;
     let ratio = to_sample_rate as f64 / from_sample_rate as f64;
-
-    // Adaptive parameters based on sample rate ratio
-    let (sinc_len, interpolation_type, oversampling) = if ratio >= 2.0 {
-        // Large upsampling (e.g., 8kHz → 16kHz, 16kHz → 48kHz, 24kHz → 48kHz)
-        // Needs high quality to avoid artifacts
-        debug!("High-quality upsampling: {}Hz → {}Hz (ratio: {:.2}x)",
-               from_sample_rate, to_sample_rate, ratio);
-        (
-            512,                              // Longer sinc for smoother interpolation
-            SincInterpolationType::Cubic,     // Cubic for best quality
-            512,                              // Higher oversampling
-        )
-    } else if ratio >= 1.5 {
-        // Moderate upsampling (e.g., 32kHz → 48kHz)
-        debug!("Moderate upsampling: {}Hz → {}Hz (ratio: {:.2}x)",
-               from_sample_rate, to_sample_rate, ratio);
-        (
-            384,
-            SincInterpolationType::Cubic,
-            384,
-        )
-    } else if ratio > 1.0 {
-        // Small upsampling (e.g., 44.1kHz → 48kHz)
-        debug!("Small upsampling: {}Hz → {}Hz (ratio: {:.2}x)",
-               from_sample_rate, to_sample_rate, ratio);
-        (
-            256,
-            SincInterpolationType::Linear,
-            256,
-        )
-    } else if ratio <= 0.5 {
-        // Large downsampling (e.g., 48kHz → 16kHz, 48kHz → 8kHz)
-        // Needs strong anti-aliasing
-        debug!("Anti-aliased downsampling: {}Hz → {}Hz (ratio: {:.2}x)",
-               from_sample_rate, to_sample_rate, ratio);
-        (
-            512,                              // Longer sinc for anti-aliasing
-            SincInterpolationType::Cubic,     // Cubic for quality
-            512,
-        )
-    } else {
-        // Moderate downsampling (e.g., 48kHz → 24kHz, 48kHz → 32kHz)
-        debug!("Moderate downsampling: {}Hz → {}Hz (ratio: {:.2}x)",
-               from_sample_rate, to_sample_rate, ratio);
-        (
-            384,
-            SincInterpolationType::Linear,
-            384,
-        )
-    };
-
-    let params = SincInterpolationParameters {
-        sinc_len,
-        f_cutoff: 0.95,                      // Preserve most of the frequency content
-        interpolation: interpolation_type,
-        oversampling_factor: oversampling,
-        window: WindowFunction::BlackmanHarris2,  // Best window for audio
-    };
-
-    let mut resampler = SincFixedIn::<f32>::new(
-        ratio,
-        2.0,  // Maximum relative deviation
-        params,
-        input.len(),
-        1,    // Mono
-    )?;
-
-    let waves_in = vec![input.to_vec()];
-    let waves_out = resampler.process(&waves_in, None)?;
-
-    debug!("Resampling complete: {} samples → {} samples",
-           input.len(), waves_out[0].len());
-
-    Ok(waves_out.into_iter().next().unwrap())
+    let mut out = Vec::with_capacity((input.len() as f64 * ratio) as usize + 1024);
+    // Feed in modest pieces: the resampler keeps its pending input in a Vec.
+    let piece = from_sample_rate as usize;
+    let report_every = 60;
+    for (index, chunk) in input.chunks(piece).enumerate() {
+        resampler.process(chunk, &mut out).map_err(|e| anyhow::anyhow!("Resampling failed: {e}"))?;
+        if (index + 1) % report_every == 0 {
+            progress(((index + 1) * piece) as f64 / input.len() as f64);
+        }
+    }
+    resampler.drain(&mut out).map_err(|e| anyhow::anyhow!("Resampling failed: {e}"))?;
+    progress(1.0);
+    debug!("Resampling complete: {} samples → {} samples", input.len(), out.len());
+    Ok(out)
 }
 
 // Alias for compatibility with existing code
