@@ -636,6 +636,8 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             parakeet_engine::coreml::prepare_in_background();
             audio::room_cleanup::start(_app.handle().clone());
+            #[cfg(target_os = "macos")]
+            whisper_engine::coreml_encoder::prepare_in_background();
 
             Ok(())
         })

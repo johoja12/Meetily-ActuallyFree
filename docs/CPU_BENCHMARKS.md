@@ -10,11 +10,15 @@ comparable on a loaded machine; wall time shows GPU/Neural Engine work.
 |---|---|---|
 | `perf_bench::live_pipeline` | `AudioPipeline::run`: resampling, echo cancellation (with a system track), high-pass, loudness normalization, both VADs, mixing, level metering | Fed 10 ms blocks per source. Without `MEETILY_BENCH_SYSTEM` it is room-microphone mode. Writes the speech segments it emits for `live_parakeet`. Level updates are wall-clock throttled, so their count understates a real recording. |
 | `perf_bench::live_parakeet` | Live Parakeet (`ParakeetModel::transcribe_samples`) on those segments | Uses CoreML when the model folder has the CoreML copy beside it. |
+| `perf_bench::live_nemotron` | Live Nemotron on CoreML, fed 50 ms of 16 kHz audio at a time | Needs `MEETILY_BENCH_NEMOTRON_DIR` (the `nemotron3-coreml` folder). |
+| `perf_bench::room_cleanup` | Room playback cleanup: WPE, DeepFilterNet, level match (FFmpeg excluded) | Two-thread pool like the production worker. |
 | `perf_bench::post_call` | Decode + resample of the whole file, full-recording VAD, Whisper large-v3-turbo on packed windows | Whisper needs `MEETILY_BENCH_WHISPER_DIR` (the folder holding `ggml-large-v3-turbo-q5_0.bin`). |
 
-Environment: `MEETILY_BENCH_MIC` (required), `MEETILY_BENCH_SYSTEM`,
+Environment: `MEETILY_BENCH_MIC` (required), `MEETILY_BENCH_SYSTEM` (a file, or
+`silence` for a silent computer-audio track),
 `MEETILY_BENCH_SECONDS` (default 600), `MEETILY_BENCH_SEGMENTS`,
-`MEETILY_BENCH_PARAKEET_DIR`, `MEETILY_BENCH_WHISPER_DIR`. Run one test per
+`MEETILY_BENCH_PARAKEET_DIR`, `MEETILY_BENCH_WHISPER_DIR`, `MEETILY_BENCH_NEMOTRON_DIR`.
+Run one test per
 invocation from `frontend/src-tauri`:
 
 ```text
@@ -47,3 +51,22 @@ for the dual-source run is another meeting's microphone.
 Not covered yet: live Nemotron (CoreML, RTF 0.05 in its own qualification test), the
 WebView, logging, transcript file writes, speaker embeddings, and room cleanup
 (RTF 0.04 at normal priority in `room_cleanup` tests).
+
+## After the CPU-reduction pass (November 3, same inputs)
+
+| Stage | Before | After | Change |
+|---|---|---|---|
+| Live pipeline, room microphone (25 min) | 11.2 CPU-s | 9.1 CPU-s | Silero session reset instead of rebuild; loudness histogram mode, no unused true peak |
+| Live pipeline, mic + system, other side talking throughout (10 min) | 6.8% | 5.5% | Vectorized/polyphase echo-canceller filters, reused model buffers |
+| Live pipeline, mic + silent system (10 min) | 6.7% | 1.3% | Echo model skipped while the reference is silent |
+| Post-call decode + resample (27 min) | 5.7 CPU-s (all cores) | 1.2 CPU-s | Streaming FFT resampler instead of parallel 512-tap sinc |
+| Post-call Whisper (27 min) | 112 s wall | 58 s wall | CoreML encoder on the Neural Engine; one reused decoder state |
+| Room cleanup | started 60 s after Stop, overlapping post-call | starts after 60 s of no recording or post-call work | scheduling only; FFmpeg children in the background class |
+
+Also: level meters scale with `transform` (no layout per update) and update every
+60 ms per source instead of 40 ms; the recording state poll runs once a second.
+The WebView's CPU is not measured by these benchmarks.
+
+Still on the CPU, measured: room cleanup DeepFilterNet 20 CPU-s and WPE 10.6
+CPU-s per 10 min of audio (background priority, after post-call work). Live
+Parakeet (0.9%) and live Nemotron (0.2%) are already small.
