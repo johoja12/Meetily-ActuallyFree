@@ -30,9 +30,11 @@ Use recordings you are allowed to keep locally; never commit them or the segment
 files. Lines starting with `BENCH` are the results.
 
 `frontend/scripts/sample-meetily-cpu.sh <out.log>` samples the installed app's
-native CPU every 15 s with a recording flag from the app log, for before/after
-comparisons on real meetings (`ps` CPU time deltas are exact; `%cpu` is a decaying
-average). It does not see the WebView (WebKit WebContent) process.
+native CPU, and the WebKit WebContent process that renders its windows, every
+15 s with a recording flag from the app log, for before/after comparisons on
+real meetings (`ps` CPU time deltas are exact; `%cpu` is a decaying average).
+WebContent is matched by launch time (started within 10 s after the native
+process). `sample <pid> 5` on either process shows where the time goes.
 
 ## Baseline (November 3, M4, main at fc5099f)
 
@@ -70,3 +72,33 @@ The WebView's CPU is not measured by these benchmarks.
 Still on the CPU, measured: room cleanup DeepFilterNet 20 CPU-s and WPE 10.6
 CPU-s per 10 min of audio (background priority, after post-call work). Live
 Parakeet (0.9%) and live Nemotron (0.2%) are already small.
+
+## A real recording (November 3, M4, 0.2.26 build with the changes above)
+
+A 53-minute room-microphone meeting (Jabra Speak 710, live Parakeet and live
+Nemotron with voice-profile naming), sampled with `ps` over 30 s windows and
+profiled with `sample`:
+
+| Process | CPU (% of one core) | Where it went |
+|---|---|---|
+| Native | 13-16% | ~15% live voice-profile naming: WeSpeaker on ONNX Runtime embedding every Nemotron turn |
+| WebView (WebContent) | 10-14% | 57% of busy time in WebCore style and compositing for the level meters; 22% JavaScript |
+
+The benchmarks above miss both: they do not run voice-profile naming, and they
+do not render the window. Fixes (issue #21, #23):
+
+- Level meters draw on one canvas from the event handler. The DOM version
+  re-rendered 18 bars per meter per event through React, each with a 100 ms
+  CSS transition that never finished at ~16 events a second.
+- The recorder page no longer polls `is_recording` every second for its whole
+  life (recording or not); the compact bar reads native state every 5 s
+  instead of every 500 ms.
+- Live naming embeds each speaker channel on its first four turns, then every
+  30 s (unnamed) or 60 s (named).
+- The macOS system-audio tap is read in chunks instead of one polled,
+  timeout-wrapped sample at a time; `transcripts.json` is rewritten at most
+  every 15 s instead of after every segment (580 full rewrites in that
+  meeting).
+
+Post-call on the same meeting: Whisper (CoreML encoder) took 117 s for 53.5 min,
+the 0.036x real-time ratio measured in `perf_bench::post_call`.
