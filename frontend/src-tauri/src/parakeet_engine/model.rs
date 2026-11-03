@@ -402,6 +402,7 @@ impl ParakeetModel {
     }
 
     /// The installed CoreML conversion for a v3 model directory, if complete.
+    #[cfg(target_os = "macos")]
     pub fn coreml_dir_for(model_dir: &Path) -> Option<std::path::PathBuf> {
         let is_v3 = model_dir.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("parakeet-tdt-0.6b-v3"));
         let dir = super::coreml::dir_for(model_dir);
