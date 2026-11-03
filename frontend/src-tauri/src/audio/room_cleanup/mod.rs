@@ -14,9 +14,10 @@
 //!
 //! Ownership and lifecycle: one native worker thread (started from app setup)
 //! owns all processing, so jobs outlive any window. It runs at background
-//! priority with a two-thread compute pool, never while a recording is active
-//! (a job in progress stops within about a second when capture starts and is
-//! retried after the recording ends), and writes to a temporary file that is
+//! priority with a two-thread compute pool, and starts a job only after a
+//! minute with no recording or post-call work (re-transcription, import,
+//! speaker identification, voice learning). A job in progress stops within
+//! about a second when capture starts and is retried after the recording ends; and writes to a temporary file that is
 //! renamed into place only once complete, so a crash never leaves a truncated
 //! copy. At startup it queues every completed room recording that lacks a copy.
 pub mod dfn;
@@ -39,9 +40,9 @@ const SOURCE_FILE: &str = "mic.mp4";
 const TEMP_FILE: &str = ".room-clean.m4a.part";
 /// Emitted with `{ "folder": … }` when a copy is written.
 pub const CLEANED_EVENT: &str = "room-playback-cleaned";
-/// Wait this long after a recording ends before resuming, so stopping and the
-/// post-call steps that follow get the machine first.
-const AFTER_RECORDING_GRACE: Duration = Duration::from_secs(60);
+/// Start only after the app has had no recording or post-call work for this
+/// long: the post-call steps run back to back with short gaps between them.
+const IDLE_BEFORE_START: Duration = Duration::from_secs(60);
 const SAMPLE_RATE: usize = dfn::SAMPLE_RATE;
 /// AAC for listening: speech at 128 kbps is transparent and keeps the extra
 /// copy smaller than the 192 kbps original.
@@ -194,7 +195,14 @@ fn spawn(command: &mut Command) -> Result<Child> {
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         command.creation_flags(CREATE_NO_WINDOW);
     }
-    command.spawn().map_err(|e| anyhow!("{e}"))
+    let child = command.spawn().map_err(|e| anyhow!("{e}"))?;
+    // The decoder/encoder are part of a background job too.
+    #[cfg(target_os = "macos")]
+    // SAFETY: changes the scheduling class of our own child process.
+    unsafe {
+        libc::setpriority(libc::PRIO_DARWIN_PROCESS, child.id() as libc::id_t, libc::PRIO_DARWIN_BG);
+    }
+    Ok(child)
 }
 
 fn kill(child: &mut Child) {
@@ -272,15 +280,9 @@ fn run_worker<R: Runtime>(app: &AppHandle<R>, pool: &rayon::ThreadPool) {
         if failed.contains(&folder) {
             continue;
         }
-        // Never compete with capture; let the save and post-call work go first.
-        let mut waited = false;
-        while recording() {
-            waited = true;
-            std::thread::sleep(Duration::from_secs(5));
-        }
-        if waited {
-            std::thread::sleep(AFTER_RECORDING_GRACE);
-        }
+        // Never compete with capture or post-call processing: wait until the
+        // app has been idle for a minute.
+        wait_until_idle();
         if !needs_cleanup(&folder) {
             continue;
         }
@@ -306,6 +308,28 @@ fn run_worker<R: Runtime>(app: &AppHandle<R>, pool: &rayon::ThreadPool) {
                 failed.insert(folder);
             }
         }
+    }
+}
+
+/// Recording, transcript re-runs, imports, speaker identification and voice
+/// learning all have the machine first.
+fn app_busy() -> bool {
+    super::recording_commands::is_recording_active()
+        || super::retranscription::is_retranscription_in_progress()
+        || super::import::is_import_in_progress()
+        || crate::diarization::operation_busy()
+        || crate::diarization::voice_learning::get_voice_learning_running()
+}
+
+fn wait_until_idle() {
+    let mut idle_since: Option<Instant> = None;
+    loop {
+        if app_busy() {
+            idle_since = None;
+        } else if idle_since.get_or_insert_with(Instant::now).elapsed() >= IDLE_BEFORE_START {
+            return;
+        }
+        std::thread::sleep(Duration::from_secs(5));
     }
 }
 
