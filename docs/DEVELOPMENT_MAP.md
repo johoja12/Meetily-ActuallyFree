@@ -500,6 +500,10 @@ meetings and devices; the file stays local and is never part of the repo.
 
 ## 6. Tests, qualification, and historical notes
 
+CPU cost per stage is measured with the ignored `perf_bench` tests and the
+`sample-meetily-cpu.sh` sampler; see [CPU_BENCHMARKS.md](CPU_BENCHMARKS.md) for inputs
+and the current baseline.
+
 macOS publication supports an explicitly labeled CI-qualified preview via
 `publish-macos.yml` (`preview=true`). It records no physical-test attestation,
 publishes a separate non-Latest prerelease, and retains artifact/hash/source
