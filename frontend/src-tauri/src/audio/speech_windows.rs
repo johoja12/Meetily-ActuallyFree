@@ -22,6 +22,8 @@ pub struct SpeechWindow {
     pub speaker_hint: Option<&'static str>,
     /// How many VAD segments were packed into this window.
     pub segment_count: usize,
+    /// Recording-time `[start_ms, end_ms)` of each packed segment, in order.
+    pub spans_ms: Vec<(f64, f64)>,
 }
 
 impl SpeechWindow {
@@ -64,8 +66,11 @@ pub fn pack_speech_windows(
             } else {
                 let window = &mut open[index];
                 window.samples.resize(window.samples.len() + gap, 0.0);
+                let start_ms = window.end_ms(); // after the gap fill
                 window.samples.extend_from_slice(&segment.samples[skip.min(segment.samples.len())..]);
                 window.segment_count += 1;
+                let end_ms = window.end_ms();
+                window.spans_ms.push((start_ms.min(end_ms), end_ms));
                 continue;
             }
         }
@@ -74,6 +79,7 @@ pub fn pack_speech_windows(
             samples: segment.samples.clone(),
             speaker_hint: *hint,
             segment_count: 1,
+            spans_ms: vec![(segment.start_timestamp_ms, segment.start_timestamp_ms + segment.samples.len() as f64 / SAMPLES_PER_MS)],
         });
     }
 
@@ -153,6 +159,51 @@ pub async fn transcribe_packed(
     Ok(Some(out))
 }
 
+/// Parakeet post-call windows: the Whisper packing (25 s, split at gaps over
+/// 1.5 s). On three AMI far-field test meetings (55 min, manual transcripts,
+/// M4) WER was Parakeet v3 packed 27.9% (16.5 s), Parakeet per VAD segment
+/// 32.7%, Whisper large-v3-turbo packed greedy 31.8% (144 s); packed Parakeet
+/// was best on all three. The CoreML runtime cuts windows over 15 s at quiet
+/// points internally and joins the token streams.
+pub const PARAKEET_WINDOW_SAMPLES: usize = WHISPER_WINDOW_SAMPLES;
+pub const PARAKEET_WINDOW_MAX_GAP_MS: f64 = WHISPER_WINDOW_MAX_GAP_MS;
+
+/// Decodes `segments` with Parakeet in packed windows, one decode per window,
+/// and returns one row per packed VAD segment (words are assigned by token
+/// time; empty rows are dropped). `before_window` works as in `transcribe_packed`.
+pub async fn transcribe_packed_parakeet(
+    engine: &crate::parakeet_engine::ParakeetEngine,
+    segments: &[(SpeechSegment, Option<&'static str>)],
+    vocabulary: Option<&str>,
+    mut before_window: impl FnMut(usize, usize, &SpeechWindow) -> bool,
+) -> anyhow::Result<Option<Vec<PackedText>>> {
+    let windows = pack_speech_windows(segments, PARAKEET_WINDOW_SAMPLES, PARAKEET_WINDOW_MAX_GAP_MS);
+    log::info!("Processing {} speech segments in {} Parakeet windows", segments.len(), windows.len());
+    let mut out = Vec::new();
+    for (index, window) in windows.iter().enumerate() {
+        if !before_window(index, windows.len(), window) {
+            return Ok(None);
+        }
+        let spans: Vec<(f32, f32)> = window
+            .spans_ms
+            .iter()
+            .map(|&(a, b)| (((a - window.start_ms) / 1000.0) as f32, ((b - window.start_ms) / 1000.0) as f32))
+            .collect();
+        let texts = engine
+            .transcribe_spans(window.samples.clone(), vocabulary, &spans)
+            .await
+            .map_err(|e| anyhow::anyhow!("Parakeet transcription failed at {:.1}s: {}", window.start_ms / 1000.0, e))?;
+        for (&(start_ms, end_ms), text) in window.spans_ms.iter().zip(texts) {
+            if text.is_empty() {
+                continue;
+            }
+            let (rms, _) = signal_level(window.slice_ms(start_ms, end_ms));
+            out.push(PackedText { text, start_ms, end_ms, rms, speaker_hint: window.speaker_hint });
+        }
+    }
+    Ok(Some(out))
+}
+
 /// Text-length confidence heuristic shared with the per-segment path.
 pub fn text_confidence(text: &str) -> f32 {
     (text.len() as f32 / 100.0).min(0.9) + 0.1
@@ -187,6 +238,18 @@ mod tests {
         // The 500 ms gap is silence, and the third segment lands at its recording time.
         assert!(w.slice_ms(11_000.0, 11_500.0).iter().all(|&s| s == 0.0));
         assert!(w.slice_ms(11_500.0, 13_500.0).iter().all(|&s| s == 0.3));
+    }
+
+    #[test]
+    fn windows_record_each_packed_segment_span() {
+        let segments = vec![
+            (seg(1_000.0, 5_000.0, 0.1), None),
+            (seg(6_500.0, 2_000.0, 0.2), None),  // 500 ms gap
+            (seg(8_400.0, 1_000.0, 0.3), None),  // starts 100 ms early
+        ];
+        let windows = pack_speech_windows(&segments, 30 * 16_000, 1_500.0);
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].spans_ms, vec![(1_000.0, 6_000.0), (6_500.0, 8_500.0), (8_500.0, 9_400.0)]);
     }
 
     #[test]
@@ -313,10 +376,27 @@ mod bench {
             parakeet.discover_models().await.unwrap();
             parakeet.load_model("parakeet-tdt-0.6b-v3-int8").await.unwrap();
             let t = Instant::now();
+            let mut dump = String::new();
             for (s, _) in &split {
-                reference_words.extend(words(&parakeet.transcribe_audio(s.samples.clone(), None).await.unwrap()));
+                let text = parakeet.transcribe_audio(s.samples.clone(), None).await.unwrap();
+                reference_words.extend(words(&text));
+                dump += &format!("{:.1}-{:.1} {}\n", s.start_timestamp_ms / 1000.0, s.end_timestamp_ms / 1000.0, text);
             }
             println!("parakeet reference: {:.1}s, {} words", t.elapsed().as_secs_f64(), reference_words.len());
+            // Post-call Parakeet: packed windows, one row per VAD segment.
+            let t = Instant::now();
+            let mut packed = String::new();
+            let rows = transcribe_packed_parakeet(&parakeet, &split, None, |_, _, _| true).await.unwrap().unwrap();
+            for r in &rows {
+                packed += &format!("{:.1}-{:.1} {}\n", r.start_ms / 1000.0, r.end_ms / 1000.0, r.text);
+            }
+            println!("parakeet packed: {:.1}s ({:.1}x real time)", t.elapsed().as_secs_f64(), minutes * 60.0 / t.elapsed().as_secs_f64());
+            if let Some(dir) = &out_dir {
+                std::fs::create_dir_all(format!("{dir}/parakeet")).unwrap();
+                std::fs::write(format!("{dir}/parakeet/packed-Segments.txt"), dump).unwrap();
+                std::fs::write(format!("{dir}/parakeet/packed-Windows.txt"), packed).unwrap();
+            }
+            if std::env::var("MEETILY_BENCH_ONLY_PARAKEET").is_ok() { return; }
             if !baseline_words.is_empty() {
                 println!("per-segment beam vs parakeet: {:.1}% word disagreement", 100.0 * disagreement(&reference_words, &baseline_words));
             }

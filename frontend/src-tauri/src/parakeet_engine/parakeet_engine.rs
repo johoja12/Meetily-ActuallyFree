@@ -532,6 +532,23 @@ impl ParakeetEngine {
         Ok(result.text)
     }
 
+    /// Transcribes `audio_data` in one pass and returns one text per span
+    /// (seconds from its start); see `ParakeetModel::transcribe_spans`.
+    pub async fn transcribe_spans(
+        &self,
+        audio_data: Vec<f32>,
+        vocabulary: Option<&str>,
+        spans: &[(f32, f32)],
+    ) -> Result<Vec<String>> {
+        let mut model_guard = self.current_model.write().await;
+        let model = model_guard
+            .as_mut()
+            .ok_or_else(|| anyhow!("No Parakeet model loaded. Please load a model first."))?;
+        model
+            .transcribe_spans(audio_data, vocabulary, spans)
+            .map_err(|e| anyhow!("Parakeet transcription failed: {}", e))
+    }
+
     /// Get the models directory path
     pub async fn get_models_directory(&self) -> PathBuf {
         self.models_dir.clone()

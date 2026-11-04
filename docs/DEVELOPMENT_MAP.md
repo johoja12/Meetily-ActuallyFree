@@ -301,7 +301,17 @@ linearly to recording time. `WhisperEngine::transcribe_timed` decodes a window
 with timestamps on (rows capped near 120 characters, about the old row length)
 and the caller adds 1 s of trailing silence so whisper.cpp keeps a short last
 utterance. Cancellation and recording preemption are checked per window.
-Parakeet still runs per segment. Measured on a 19.4 min room-mic meeting
+Parakeet batch runs pack the same windows (`transcribe_packed_parakeet`): one
+decode per window, then `ParakeetModel::transcribe_spans` assigns each word,
+by its first token's time, to the packed VAD segment containing it (or the
+nearest one), so rows stay one per VAD segment and the vocabulary correction
+runs per row. On the AMI meetings below, WER was Parakeet v3 packed 27.9%
+(16.5 s for 55 min, CoreML), Parakeet per segment 32.7%, Whisper packed greedy
+31.8% (144 s); packed Parakeet was best on all three meetings, so Settings now
+recommends Parakeet for post-call and Whisper for other languages and manual
+language control. Nemotron 3.5 ASR Streaming (CoreML, FluidAudio) was also
+measured as a live replacement and was worse than Parakeet per segment (35.8%
+at 1120 ms chunks, 37.0% at 560 ms); live ASR is unchanged. Measured on a 19.4 min room-mic meeting
 (M4, large-v3-turbo-q5_0, Metal): 259-274 s per segment vs 87-95 s packed;
 the two transcripts differ by ~14% of words with no clear winner (packing
 recovers speech the per-segment run dropped, and misses some words it had).

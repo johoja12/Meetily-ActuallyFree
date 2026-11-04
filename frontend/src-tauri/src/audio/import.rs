@@ -596,28 +596,39 @@ async fn run_import<R: Runtime>(
             all_transcripts.push((t.text, t.start_ms, t.end_ms));
         }
     } else if let Some(engine) = parakeet_engine.as_ref() {
-        processable_count = processable_segments.len();
-        info!("Processing {} segments (after splitting)", processable_count);
-        for (i, segment) in processable_segments.iter().enumerate() {
-            if IMPORT_CANCELLED.load(Ordering::SeqCst) {
-                let _ = std::fs::remove_dir_all(&meeting_folder);
-                return Err(anyhow!("Import cancelled"));
-            }
-            let segment_duration_sec = (segment.end_timestamp_ms - segment.start_timestamp_ms) / 1000.0;
-            emit_progress(
-                &app,
-                "transcribing",
-                30 + ((i as f32 / processable_count.max(1) as f32) * 50.0) as u32,
-                &format!("Transcribing segment {} of {} ({:.1}s)...", i + 1, processable_count, segment_duration_sec),
-            );
-            let text = engine
-                .transcribe_audio(segment.samples.clone(), vocabulary.as_deref())
-                .await
-                .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
-            if !text.trim().is_empty() {
-                all_transcripts.push((text, segment.start_timestamp_ms, segment.end_timestamp_ms));
-                total_confidence += 0.9;
-            }
+        // Same packed decoding as post-call retranscription.
+        let unlabeled: Vec<(crate::audio::vad::SpeechSegment, Option<&'static str>)> =
+            processable_segments.into_iter().map(|segment| (segment, None)).collect();
+        let mut windows = 0;
+        let texts = super::speech_windows::transcribe_packed_parakeet(
+            engine,
+            &unlabeled,
+            vocabulary.as_deref(),
+            |i, count, window| {
+                windows = count;
+                emit_progress(
+                    &app,
+                    "transcribing",
+                    30 + ((i as f32 / count.max(1) as f32) * 50.0) as u32,
+                    &format!(
+                        "Transcribing part {} of {} ({:.0}s)...",
+                        i + 1,
+                        count,
+                        (window.end_ms() - window.start_ms) / 1000.0
+                    ),
+                );
+                !IMPORT_CANCELLED.load(Ordering::SeqCst)
+            },
+        )
+        .await?;
+        let Some(texts) = texts else {
+            let _ = std::fs::remove_dir_all(&meeting_folder);
+            return Err(anyhow!("Import cancelled"));
+        };
+        processable_count = windows;
+        for t in texts {
+            all_transcripts.push((t.text, t.start_ms, t.end_ms));
+            total_confidence += 0.9;
         }
     } else {
         processable_count = 0;
