@@ -504,6 +504,19 @@ is not loaded into launchd until the next login. Tests cover the launch
 arguments and plist escaping; activation-policy switching and the login launch
 were not exercised by tests.
 
+**Icons.** Every app, tray and in-app icon is generated from the SVGs in
+`src-tauri/icons/source/` by `generate.sh` (resvg + `tauri icon`): `app.svg`
+(full-bleed tile) for the `.ico`, PNGs and `public/` logos, `app-macos.svg`
+(Apple icon grid with shadow) for `icon.icns` only. The tray icon is not the app
+icon. `tray::apply_recording_icon` swaps it on every tray state refresh
+(`set_tray_state`, `update_tray_menu_async`): Recording, Pausing, Resuming and
+Stopping show the recording image; Stopped, Starting and Paused the idle one.
+On macOS the idle image is a template (tinted to the menu bar) and the recording
+image is a full-colour red bubble, since a template cannot hold colour; on
+Windows the tray shows the app tile, with a red dot while recording, and the
+main window's taskbar button gets a red overlay. The Windows overlay path is
+compiled only by the Windows build; none of the icon swapping is covered by tests.
+
 Windows already closed to the tray. "Start at sign-in in the system tray" (same
 commands, issue #11) writes `HKCU\...\CurrentVersion\Run\Meetily - Actually Free`
 = `"<exe>" --menu-bar`. A Task Manager "Disabled" lives under
