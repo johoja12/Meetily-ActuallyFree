@@ -1,8 +1,35 @@
+use std::sync::atomic::{AtomicU8, Ordering};
 use tauri::{
+    image::Image,
+    include_image,
     menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem},
-    tray::TrayIconBuilder,
+    tray::{TrayIcon, TrayIconBuilder},
     AppHandle, Manager, Runtime,
 };
+
+const TOOLTIP: &str = "Meetily - Actually Free";
+const TOOLTIP_RECORDING: &str = "Meetily - Actually Free (recording)";
+
+// Tray images, generated from icons/source/*.svg by icons/source/generate.sh.
+// macOS idle is a template image (macOS tints it black or white to match the
+// menu bar); a template cannot hold colour, so the recording one is a
+// full-colour red bubble that reads on either. Elsewhere the tray shows the app
+// tile, with a red dot while recording.
+#[cfg(target_os = "macos")]
+const TRAY_IDLE: Image<'static> = include_image!("./icons/tray/tray-macos.png");
+#[cfg(target_os = "macos")]
+const TRAY_RECORDING: Image<'static> = include_image!("./icons/tray/tray-macos-recording.png");
+#[cfg(not(target_os = "macos"))]
+const TRAY_IDLE: Image<'static> = include_image!("./icons/tray/tray-windows.png");
+#[cfg(not(target_os = "macos"))]
+const TRAY_RECORDING: Image<'static> = include_image!("./icons/tray/tray-windows-recording.png");
+#[cfg(target_os = "windows")]
+const TASKBAR_OVERLAY_RECORDING: Image<'static> = include_image!("./icons/tray/overlay-recording.png");
+
+/// The tray image last applied (0 = none yet, 1 = idle, 2 = recording). The
+/// menu is rebuilt on every state refresh; this keeps the icon from being
+/// re-uploaded (and flickering) when only the menu changed.
+static SHOWN_ICON: AtomicU8 = AtomicU8::new(0);
 
 #[derive(Debug, Clone)]
 pub enum RecordingState {
@@ -27,8 +54,9 @@ pub fn create_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         // the menu and never the app. Reserve left-click for "open the window"
         // and leave the menu on right-click, which is what people expect.
         .show_menu_on_left_click(false)
-        .tooltip("Meetily - Actually Free")
-        .icon(app.default_window_icon().unwrap().clone())
+        .tooltip(TOOLTIP)
+        .icon(TRAY_IDLE)
+        .icon_as_template(cfg!(target_os = "macos"))
         .on_menu_event(|app, event| handle_menu_event(app, event.id.as_ref()))
         .on_tray_icon_event(|tray, event| {
             use tauri::tray::{MouseButton, MouseButtonState, TrayIconEvent};
@@ -44,6 +72,7 @@ pub fn create_tray<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
             }
         })
         .build(app)?;
+    SHOWN_ICON.store(1, Ordering::Relaxed);
 
     // Update tray menu with actual recording state after creation
     update_tray_menu(app);
@@ -226,17 +255,56 @@ pub fn update_tray_menu<R: Runtime>(app: &AppHandle<R>) {
 
 pub fn set_tray_state<R: Runtime>(app: &AppHandle<R>, state: RecordingState) {
     log::info!("Tray: Setting intermediate state: {:?}", state);
+    let recording = shows_recording(&state);
     // During recording state transitions, we assume recording is allowed (we're already recording)
     if let Ok(menu) = build_menu(app, state, true) {
         if let Some(tray) = app.tray_by_id("main-tray") {
             let result = tray.set_menu(Some(menu));
             log::info!("Tray: Intermediate state menu update result: {:?}", result);
+            apply_recording_icon(app, &tray, recording);
         } else {
             log::warn!("Tray: Could not find tray with id 'main-tray'");
         }
     } else {
         log::error!("Tray: Failed to build menu for intermediate state");
     }
+}
+
+/// Audio is being captured (or about to stop) in this state, so the tray shows
+/// the recording icon. Paused and Starting show the idle icon: nothing is being
+/// captured yet / at the moment.
+fn shows_recording(state: &RecordingState) -> bool {
+    matches!(
+        state,
+        RecordingState::Recording | RecordingState::Pausing | RecordingState::Resuming | RecordingState::Stopping
+    )
+}
+
+/// Swap the tray icon (and, on Windows, the taskbar-button overlay) between idle
+/// and recording. No-op when that icon is already showing.
+fn apply_recording_icon<R: Runtime>(app: &AppHandle<R>, tray: &TrayIcon<R>, recording: bool) {
+    let wanted = if recording { 2 } else { 1 };
+    if SHOWN_ICON.swap(wanted, Ordering::Relaxed) == wanted {
+        return;
+    }
+    let image = if recording { TRAY_RECORDING } else { TRAY_IDLE };
+    if let Err(error) = tray.set_icon(Some(image)) {
+        log::warn!("Tray: could not set the {} icon: {error}", if recording { "recording" } else { "idle" });
+        SHOWN_ICON.store(0, Ordering::Relaxed);
+    }
+    // Set after the image: macOS applies the template flag to the current image.
+    let _ = tray.set_icon_as_template(cfg!(target_os = "macos") && !recording);
+    let _ = tray.set_tooltip(Some(if recording { TOOLTIP_RECORDING } else { TOOLTIP }));
+
+    #[cfg(target_os = "windows")]
+    if let Some(window) = app.get_webview_window("main") {
+        let overlay = recording.then_some(TASKBAR_OVERLAY_RECORDING);
+        if let Err(error) = window.set_overlay_icon(overlay) {
+            log::warn!("Taskbar: could not set the recording overlay: {error}");
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = app;
 }
 
 async fn get_current_recording_state() -> RecordingState {
@@ -306,10 +374,12 @@ pub async fn update_tray_menu_async<R: Runtime>(app: &AppHandle<R>) {
     let can_record = check_can_record(app).await;
     log::info!("Tray: can_record: {}", can_record);
 
+    let recording = shows_recording(&recording_state);
     if let Ok(menu) = build_menu(app, recording_state, can_record) {
         if let Some(tray) = app.tray_by_id("main-tray") {
             let result = tray.set_menu(Some(menu));
             log::info!("Tray: Menu update result: {:?}", result);
+            apply_recording_icon(app, &tray, recording);
         } else {
             log::warn!("Tray: Could not find tray with id 'main-tray'");
         }

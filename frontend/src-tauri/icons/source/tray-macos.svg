@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="44" height="44" viewBox="0 0 44 44">
+  <!-- macOS menu-bar icon (22 pt at 2x). Used as a template image: macOS keeps
+       only the alpha and draws it black or white to match the menu bar. -->
+  <g transform="translate(4 4) scale(1.5)" fill="none" stroke="#000000" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M6.5 3.5h11a2.5 2.5 0 0 1 2.5 2.5v8a2.5 2.5 0 0 1-2.5 2.5H11.5L7 20.5v-4h-.5A2.5 2.5 0 0 1 4 14V6a2.5 2.5 0 0 1 2.5-2.5z"/>
+    <path d="M8.5 9v2M10.83 7.5v5M13.17 8.25v3.5M15.5 9.25v1.5"/>
+  </g>
+</svg>
