@@ -324,6 +324,19 @@ fn levenshtein(left: &str, right: &str) -> usize {
 static DECODE_SPACE_RE: Lazy<Result<Regex, regex::Error>> =
     Lazy::new(|| Regex::new(r"\A\s|\s\B|(\s)\b"));
 
+/// Index of the span containing `time`, else the nearest one (ties go to the
+/// earlier span, so a word in a gap usually stays with the sentence before it).
+fn span_for(spans: &[(f32, f32)], time: f32) -> usize {
+    let distance = |&(start, end): &(f32, f32)| if time < start { start - time } else if time >= end { time - end } else { 0.0 };
+    let mut best = 0;
+    for (index, span) in spans.iter().enumerate() {
+        if distance(span) < distance(&spans[best]) {
+            best = index;
+        }
+    }
+    best
+}
+
 #[derive(Debug, Clone)]
 pub struct TimestampedResult {
     pub text: String,
@@ -864,18 +877,28 @@ impl ParakeetModel {
     }
 
     fn decode_tokens(&self, ids: Vec<i32>, timestamps: Vec<usize>) -> TimestampedResult {
-        let tokens: Vec<String> = ids
+        // Ids and frames are filtered together so `timestamps[i]` stays the
+        // start of `tokens[i]` (transcribe_spans depends on it).
+        let (tokens, frames): (Vec<String>, Vec<usize>) = ids
             .iter()
-            .filter_map(|&id| {
-                let idx = id as usize;
-                if idx < self.vocab.len() {
-                    Some(self.vocab[idx].clone())
-                } else {
-                    None
-                }
-            })
+            .zip(timestamps)
+            .filter_map(|(&id, frame)| self.vocab.get(id as usize).map(|token| (token.clone(), frame)))
+            .unzip();
+        let text = self.render_text(&tokens);
+        let float_timestamps: Vec<f32> = frames
+            .iter()
+            .map(|&t| WINDOW_SIZE * SUBSAMPLING_FACTOR as f32 * t as f32)
             .collect();
 
+        TimestampedResult {
+            text,
+            timestamps: float_timestamps,
+            tokens,
+        }
+    }
+
+    /// Joins vocabulary pieces into text and applies the vocabulary correction.
+    fn render_text(&self, tokens: &[String]) -> String {
         let text = match &*DECODE_SPACE_RE {
             Ok(regex) => regex
                 .replace_all(&tokens.join(""), |caps: &regex::Captures| {
@@ -888,21 +911,39 @@ impl ParakeetModel {
                 .to_string(),
             Err(_) => tokens.join(""), // Fallback if regex failed to compile
         };
-        let text = match &self.vocabulary_bias {
+        match &self.vocabulary_bias {
             Some(bias) => bias.correct_text(&text),
             None => text,
-        };
-
-        let float_timestamps: Vec<f32> = timestamps
-            .iter()
-            .map(|&t| WINDOW_SIZE * SUBSAMPLING_FACTOR as f32 * t as f32)
-            .collect();
-
-        TimestampedResult {
-            text,
-            timestamps: float_timestamps,
-            tokens,
         }
+    }
+
+    /// Transcribes `samples` in one pass and splits the text into `spans`
+    /// (seconds from the start of `samples`, sorted, non-overlapping). Each
+    /// word goes to the span containing its first token, or the nearest span
+    /// when it starts in a gap; a span with no words yields "". Decoding a
+    /// packed window at once gives the model context across short VAD
+    /// segments (27.9% vs 32.7% WER on AMI, see speech_windows) while rows
+    /// keep VAD-segment granularity.
+    pub fn transcribe_spans(
+        &mut self,
+        samples: Vec<f32>,
+        vocabulary: Option<&str>,
+        spans: &[(f32, f32)],
+    ) -> Result<Vec<String>, ParakeetError> {
+        let result = self.transcribe_samples(samples, vocabulary)?;
+        let mut per_span: Vec<Vec<String>> = vec![Vec::new(); spans.len()];
+        if spans.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut target = 0;
+        for (token, &time) in result.tokens.iter().zip(&result.timestamps) {
+            let starts_word = token.starts_with(char::is_whitespace) || per_span.iter().all(|s| s.is_empty());
+            if starts_word {
+                target = span_for(spans, time);
+            }
+            per_span[target].push(token.clone());
+        }
+        Ok(per_span.iter().map(|tokens| self.render_text(tokens).trim().to_string()).collect())
     }
 
     /// CoreML transcription: one window (15 s) at a time; longer audio is cut
@@ -1167,6 +1208,23 @@ mod vocabulary_bias_tests {
         let logits = vec![0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 1.5, -1.0];
 
         assert_eq!(bias.select_token(&[], &logits, 8), 7);
+    }
+}
+
+#[cfg(test)]
+mod span_tests {
+    use super::span_for;
+
+    #[test]
+    fn words_go_to_their_span_or_the_nearest_one() {
+        let spans = [(0.0, 2.0), (3.0, 5.0)];
+        assert_eq!(span_for(&spans, 1.0), 0);
+        assert_eq!(span_for(&spans, 3.0), 1);
+        assert_eq!(span_for(&spans, 2.4), 0); // gap, closer to the first span
+        assert_eq!(span_for(&spans, 2.5), 0); // tie stays with the earlier span
+        assert_eq!(span_for(&spans, 2.8), 1);
+        assert_eq!(span_for(&spans, 9.0), 1); // after the last span
+        assert_eq!(span_for(&spans, -1.0), 0); // before the first span
     }
 }
 
