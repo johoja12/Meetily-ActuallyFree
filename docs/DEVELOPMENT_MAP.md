@@ -25,6 +25,10 @@ establish `You`; computer/per-app capture is excluded for the session.
 Both native startup paths now warn visibly when the selected microphone is
 unavailable and a different input is used; the linked room note documents the
 event interface, focused tests, and remaining qualification limits.
+After a room recording is saved, `audio/room_cleanup` writes a dereverberated
+`room-clean.m4a` for playback only (WPE, then DeepFilterNet limited to 12 dB);
+transcription and labeling keep using the original. See the note's "Cleaned
+playback copy" section.
 
 Speech-start pre-roll, live system speech sensitivity, and real-call replay
 qualification are documented in [LIVE_SPEECH_RETENTION.md](LIVE_SPEECH_RETENTION.md).
@@ -300,11 +304,28 @@ linearly to recording time. `WhisperEngine::transcribe_timed` decodes a window
 with timestamps on (rows capped near 120 characters, about the old row length)
 and the caller adds 1 s of trailing silence so whisper.cpp keeps a short last
 utterance. Cancellation and recording preemption are checked per window.
-Parakeet still runs per segment. Measured on a 19.4 min room-mic meeting
+Parakeet batch runs pack the same windows (`transcribe_packed_parakeet`): one
+decode per window, then `ParakeetModel::transcribe_spans` assigns each word,
+by its first token's time, to the packed VAD segment containing it (or the
+nearest one), so rows stay one per VAD segment and the vocabulary correction
+runs per row. On the AMI meetings below, WER was Parakeet v3 packed 27.9%
+(16.5 s for 55 min, CoreML), Parakeet per segment 32.7%, Whisper packed greedy
+31.8% (144 s); packed Parakeet was best on all three meetings, so Settings now
+recommends Parakeet for post-call and Whisper for other languages and manual
+language control. Nemotron 3.5 ASR Streaming (CoreML, FluidAudio) was also
+measured as a live replacement and was worse than Parakeet per segment (35.8%
+at 1120 ms chunks, 37.0% at 560 ms); live ASR is unchanged. Measured on a 19.4 min room-mic meeting
 (M4, large-v3-turbo-q5_0, Metal): 259-274 s per segment vs 87-95 s packed;
 the two transcripts differ by ~14% of words with no clear winner (packing
 recovers speech the per-segment run dropped, and misses some words it had).
-Greedy decoding was no faster and hallucinated more, so beam search stays.
+Batch windows decode greedily at temperature 0 (`WHISPER_BATCH_DECODING`).
+whisper.cpp only runs more than one beam at temperature 0, and batch runs used
+to start at the hardware profile's 0.1-0.4, so "beam search" was one beam and
+the earlier greedy comparison measured nothing. With real beam search, on
+three AMI far-field test meetings (55 min, manual transcripts, Whisper's
+English normalizer) WER was greedy 31.8%, beam 3 32.2%, beam 5 34.1%, the old
+setting 31.8%; beam took 21-58% longer (issue #22). `frontend/scripts/asr-eval/`
+fetches the AMI references and scores the bench output (`MEETILY_BENCH_OUT`).
 The benchmark is the ignored test `speech_windows::bench::bench`, which reads
 a local recording from `MEETILY_BENCH_AUDIO`. Related
 speaker/retranscription dialogs. `useDiarizationEngine.ts` refreshes selected-engine
@@ -373,6 +394,20 @@ support fetches them quietly at launch (`prepare_nemotron_coreml_in_background`,
 holding the Nemotron model operation so it cannot race a Settings download or
 uninstall), then loads both models once so CoreML compiles them before a
 recording waits on it. Uninstall removes the `nemotron3-coreml` folder.
+
+**macOS Whisper runs its encoder on the Neural Engine** when whisper.cpp's
+published CoreML conversion sits next to the model
+(`ggml-large-v3-turbo-encoder.mlmodelc`; whisper-rs is built with CoreML and
+fallback, so without the folder both halves run on Metal).
+`whisper_engine/coreml_encoder.rs` fetches the pinned zip (`ggerganov/whisper.cpp`
+at `REVISION`, SHA-256 checked) at launch and after a Whisper download for each
+installed model with a published encoder (large-v3-turbo today), unpacks it via a
+staging folder renamed into place, and compiles it once after a minute of idle
+(marker `.meetily-compiled`). Deleting the last variant of a model removes its
+encoder. `WhisperEngine::batch_state` reuses one decoder state across batch
+windows, since whisper.cpp loads the encoder whenever a state is created. 27 min
+room meeting on an M4: post-call Whisper 110 s on Metal, 58 s with the encoder,
+same words (`perf_bench::post_call`; install test `coreml_encoder::install_tests`).
 
 **macOS Parakeet uses CoreML by default** for the v3 model: `ParakeetModel::new`
 selects the pinned conversion (`FluidInference/parakeet-tdt-0.6b-v3-coreml` at
@@ -472,6 +507,19 @@ is not loaded into launchd until the next login. Tests cover the launch
 arguments and plist escaping; activation-policy switching and the login launch
 were not exercised by tests.
 
+**Icons.** Every app, tray and in-app icon is generated from the SVGs in
+`src-tauri/icons/source/` by `generate.sh` (resvg + `tauri icon`): `app.svg`
+(full-bleed tile) for the `.ico`, PNGs and `public/` logos, `app-macos.svg`
+(Apple icon grid with shadow) for `icon.icns` only. The tray icon is not the app
+icon. `tray::apply_recording_icon` swaps it on every tray state refresh
+(`set_tray_state`, `update_tray_menu_async`): Recording, Pausing, Resuming and
+Stopping show the recording image; Stopped, Starting and Paused the idle one.
+On macOS the idle image is a template (tinted to the menu bar) and the recording
+image is a full-colour red bubble, since a template cannot hold colour; on
+Windows the tray shows the app tile, with a red dot while recording, and the
+main window's taskbar button gets a red overlay. The Windows overlay path is
+compiled only by the Windows build; none of the icon swapping is covered by tests.
+
 Windows already closed to the tray. "Start at sign-in in the system tray" (same
 commands, issue #11) writes `HKCU\...\CurrentVersion\Run\Meetily - Actually Free`
 = `"<exe>" --menu-bar`. A Task Manager "Disabled" lives under
@@ -498,6 +546,10 @@ The file is capped at 10 MB, then moves to `meetily.1.log`. Lines can name
 meetings and devices; the file stays local and is never part of the repo.
 
 ## 6. Tests, qualification, and historical notes
+
+CPU cost per stage is measured with the ignored `perf_bench` tests and the
+`sample-meetily-cpu.sh` sampler; see [CPU_BENCHMARKS.md](CPU_BENCHMARKS.md) for inputs
+and the current baseline.
 
 macOS publication supports an explicitly labeled CI-qualified preview via
 `publish-macos.yml` (`preview=true`). It records no physical-test attestation,

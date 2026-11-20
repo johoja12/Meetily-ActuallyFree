@@ -83,6 +83,20 @@ impl ContinuousVadProcessor {
     /// Whether speech has started but has not yet crossed the redemption-time
     /// silence boundary. Live capture uses this to advance only an unfinished
     /// utterance when an audio backend suppresses exact-zero callbacks.
+    /// Return the Silero session to silence with fresh recurrent state and
+    /// drop its buffered audio, keeping the loaded ONNX model.
+    ///
+    /// Building a `VadSession` loads and graph-optimizes the model (tens of
+    /// ms); doing that after every utterance cost a rebuild about every 1.4 s
+    /// of a real meeting. silero-rs's `reset` keeps its audio buffer, so trim
+    /// it here; its clock keeps running, so `session_start_sample` (the
+    /// session's zero on the meeting timeline) stays valid. Timeline jumps and
+    /// panics still rebuild the session, since they move that zero.
+    fn restart_session(&mut self) {
+        self.session.reset();
+        self.session.trim_start_silence();
+    }
+
     pub fn has_active_speech(&self) -> bool {
         self.in_speech
     }
@@ -99,20 +113,9 @@ impl ContinuousVadProcessor {
         let end_ms = (self.processed_samples as f64 / 16000.0) * 1000.0;
         self.in_speech = false;
         self.last_logged_state = false;
-        // Silero's reset intentionally retains session_audio. Recreate the
-        // session so repeated callback-silence finalizations stay O(utterance)
-        // in memory, then offset its future relative timestamps onto the
-        // continuous meeting timeline.
-        match VadSession::new(self.config) {
-            Ok(session) => {
-                self.session = session;
-                self.session_start_sample = self.processed_samples;
-            }
-            Err(error) => {
-                warn!("Failed to recreate VAD session after forced finalization: {error:?}");
-                self.session.reset();
-            }
-        }
+        // Back to silence on the same model; trimming keeps repeated
+        // callback-silence finalizations O(utterance) in memory.
+        self.restart_session();
         let samples = std::mem::take(&mut self.current_speech);
         let peak = samples.iter().fold(0.0f32, |m, &x| m.max(x.abs()));
         if peak == 0.0 {
@@ -387,6 +390,11 @@ impl ContinuousVadProcessor {
     }
 
     fn process_chunk(&mut self, chunk: &[f32]) -> Result<()> {
+        // silero-rs only drops audio at the end of an utterance; bound its
+        // buffer through long silences (it keeps the pre-speech pad).
+        if self.session.session_audio_samples() > 30 * 16_000 {
+            self.session.trim_start_silence();
+        }
         let transitions_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.session.process(chunk)
         }));
@@ -480,18 +488,8 @@ impl ContinuousVadProcessor {
 
                     self.current_speech.clear();
 
-                    // Recreate session so internal session_audio memory does not grow unbounded
-                    match VadSession::new(self.config) {
-                        Ok(session) => {
-                            self.session = session;
-                            // This frame was consumed by the old session; the new
-                            // session's zero is the beginning of the NEXT frame.
-                            self.session_start_sample = self.processed_samples + chunk.len();
-                        }
-                        Err(_e) => {
-                            self.session.reset();
-                        }
-                    }
+                    // Fresh model state for the next utterance, without rebuilding the model.
+                    self.restart_session();
                 }
             }
         }
@@ -519,10 +517,7 @@ impl ContinuousVadProcessor {
                         self.current_speech.clear();
                         self.in_speech = false;
                         self.last_logged_state = false;
-                        if let Ok(new_session) = VadSession::new(self.config) {
-                            self.session = new_session;
-                            self.session_start_sample = self.processed_samples + chunk.len();
-                        }
+                        self.restart_session();
                     } else {
                         let start_ms = (self.speech_start_sample as f64 / 16000.0) * 1000.0;
                         let duration_ms = (segment_samples.len() as f64 / 16000.0) * 1000.0;
@@ -989,7 +984,9 @@ mod tests {
         assert!(segment.end_timestamp_ms <= 2100.0);
         assert!(segment.end_timestamp_ms > segment.start_timestamp_ms);
         assert!(!processor.has_active_speech());
-        assert_eq!(processor.session.session_audio_samples(), 0);
+        // Only Silero's pre-speech pad remains buffered; the session (and its
+        // loaded model) is reused rather than rebuilt.
+        assert!(processor.session.session_audio_samples() <= 16_000 / 2);
         assert!(
             processor
                 .process_audio(&vec![0.0; 16000])

@@ -403,7 +403,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                 <div className="flex flex-wrap items-center gap-2">
                                     <h4 className="font-semibold">Whisper</h4>
                                     <span className="rounded-full bg-af-accent/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-af-accent">
-                                        Better for post-call
+                                        Broad language support
                                     </span>
                                     {labs.whisperSilenceGuard && (
                                         <span className="rounded-full border border-af-accent/30 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-af-accent">
@@ -412,7 +412,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                     )}
                                 </div>
                                 <p className="mt-1 text-sm text-[var(--af-text-2)]">
-                                    Best as a post-call second pass. Whisper is slower and heavier during live meetings, but supports manual language selection and broad multilingual transcription.
+                                    Slower and heavier during live meetings, but supports manual language selection and about 99 languages.
                                 </p>
                             </div>
                         </div>
@@ -499,7 +499,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                 <div className="flex flex-wrap items-center gap-2">
                                     <h4 className="font-semibold">Whisper</h4>
                                     <span className="rounded-full bg-af-accent/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-af-accent">
-                                        Recommended for post-call
+                                        Other languages
                                     </span>
                                         <span className="rounded-full bg-af-accent/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-af-accent">
                                             Prompt-based hints
@@ -511,7 +511,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                     )}
                                 </div>
                                 <p className="mt-1 text-sm text-[var(--af-text-2)]">
-                                    Whisper is slower and uses more resources, but offers a different post-call pass for difficult audio and manual language control. It uses your global vocabulary as an initial prompt.
+                                    Use for meetings outside Parakeet's 25 European languages or when you need manual language control. Slower and less accurate on English meetings in our tests. It uses your global vocabulary as an initial prompt.
                                 </p>
                             </div>
                         </div>
@@ -575,7 +575,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                 <div className="flex flex-wrap items-center gap-2">
                                     <h4 className="font-semibold">Parakeet</h4>
                                     <span className="rounded-full bg-af-success/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-af-success">
-                                        Fast and accurate
+                                        Recommended for post-call
                                     </span>
                                     {labs.parakeetGpu && (
                                         <span className="rounded-full border border-af-accent/30 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-af-accent">
@@ -584,7 +584,7 @@ export function TranscriptSettings({ transcriptModelConfig, setTranscriptModelCo
                                     )}
                                 </div>
                                 <p className="mt-1 text-sm text-[var(--af-text-2)]">
-                                    Finishes post-call enhancement sooner and uses fewer resources while maintaining strong accuracy. It applies global and meeting vocabulary through contextual biasing.
+                                    The most accurate and fastest post-call pass for English and 24 other European languages: on recorded test meetings it made about 12% fewer word errors than Whisper in a ninth of the time. It applies global and meeting vocabulary through contextual biasing.
                                 </p>
                             </div>
                         </div>

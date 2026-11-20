@@ -395,6 +395,46 @@ impl CoreAudioStream {
     pub fn sample_rate(&self) -> u32 {
         self.current_sample_rate.load(Ordering::Acquire)
     }
+
+    /// Append up to `max` buffered samples to `out`, waiting until at least
+    /// one is available. `Ready(false)` means the stream has ended.
+    ///
+    /// The recording task reads through this rather than `poll_next`: one
+    /// wake-up drains what the callback has buffered, instead of one poll
+    /// (and, in the caller, one timer) per sample, 48,000 times a second.
+    pub fn poll_chunk(&mut self, cx: &mut Context<'_>, out: &mut Vec<f32>, max: usize) -> Poll<bool> {
+        if self.last_drop_log.elapsed() >= Duration::from_secs(5) {
+            let dropped = self._ctx.dropped_samples.swap(0, Ordering::Relaxed);
+            if dropped > 0 {
+                warn!("CoreAudio system tap dropped {} samples under buffer pressure", dropped);
+            }
+            self.last_drop_log = Instant::now();
+        }
+        if self.pop_into(out, max) > 0 {
+            return Poll::Ready(true);
+        }
+        if self._ctx.should_terminate.load(Ordering::Acquire) {
+            warn!("Stream terminating due to buffer pressure");
+            return Poll::Ready(self.pop_into(out, max) > 0);
+        }
+        // Register before checking again, as in poll_next.
+        let waker_state = self.waker_state.clone();
+        let mut state = waker_state.lock().unwrap();
+        state.has_data = false;
+        state.waker = Some(cx.waker().clone());
+        if self.pop_into(out, max) > 0 {
+            return Poll::Ready(true);
+        }
+        Poll::Pending
+    }
+
+    fn pop_into(&mut self, out: &mut Vec<f32>, max: usize) -> usize {
+        let start = out.len();
+        out.resize(start + max, 0.0);
+        let n = self.consumer.pop_slice(&mut out[start..]);
+        out.truncate(start + n);
+        n
+    }
 }
 
 #[cfg(target_os = "macos")]

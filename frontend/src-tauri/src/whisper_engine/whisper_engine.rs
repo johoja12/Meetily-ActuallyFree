@@ -4,7 +4,7 @@ use std::path::{PathBuf};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use whisper_rs::{WhisperContext, WhisperContextParameters, WhisperToken, FullParams, SamplingStrategy};
+use whisper_rs::{WhisperContext, WhisperContextParameters, WhisperState, WhisperToken, FullParams, SamplingStrategy};
 use serde::{Serialize, Deserialize};
 use anyhow::{Result, anyhow};
 use reqwest::Client;
@@ -20,9 +20,9 @@ const TIMED_SEGMENT_MAX_CHARS: i32 = 120;
 /// Decoding for batch (after-the-call) Whisper runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchDecoding {
-    /// Beam search with the hardware profile's beam size.
+    /// Beam search with the hardware profile's beam size (temperature 0).
     Beam,
-    /// One candidate per step: much less CPU work in the sampler.
+    /// One candidate per step (temperature 0).
     Greedy,
 }
 
@@ -68,6 +68,12 @@ pub struct WhisperEngine {
     cancel_download_flag: Arc<RwLock<Option<String>>>, // Model name being cancelled
     // Active downloads tracking to prevent concurrent downloads
     active_downloads: Arc<RwLock<HashSet<String>>>, // Set of models currently being downloaded
+    /// Decoder state reused by batch windows (`transcribe_timed`). Creating a
+    /// state allocates its buffers and, with a CoreML encoder beside the model,
+    /// loads that encoder; doing it per 25 s window repeated the load hundreds
+    /// of times per meeting. Holds the context alive, so it is cleared whenever
+    /// the model is replaced or unloaded.
+    batch_state: Arc<tokio::sync::Mutex<Option<WhisperState>>>,
 }
 
 impl WhisperEngine {
@@ -200,6 +206,7 @@ impl WhisperEngine {
             cancel_download_flag: Arc::new(RwLock::new(None)),
             // Initialize active downloads tracking
             active_downloads: Arc::new(RwLock::new(HashSet::new())),
+            batch_state: Arc::new(tokio::sync::Mutex::new(None)),
         };
         
         Ok(engine)
@@ -353,6 +360,7 @@ impl WhisperEngine {
                 };
 
                 // Update current context and model
+                self.batch_state.lock().await.take();
                 *self.current_context.write().await = Some(ctx);
                 *self.current_model.write().await = Some(model_name.to_string());
 
@@ -380,6 +388,7 @@ impl WhisperEngine {
     }
 
     pub async fn unload_model(&self) -> bool  {
+        self.batch_state.lock().await.take();
         let mut ctx_guard = self.current_context.write().await;
         let unloaded = ctx_guard.take().is_some();
         if unloaded {
@@ -724,7 +733,12 @@ impl WhisperEngine {
         params.set_print_timestamps(false);
         params.set_suppress_blank(true);
         params.set_suppress_non_speech_tokens(true);
-        params.set_temperature(adaptive_config.temperature);
+        // First pass at temperature 0, falling back in steps of 0.2 when a
+        // window fails the entropy/log-probability checks (whisper.cpp's
+        // default schedule). This used to start at the hardware profile's
+        // 0.1-0.4, where whisper.cpp runs a single decoder whatever the
+        // strategy, so `Beam` never searched more than one beam (issue #22).
+        params.set_temperature(0.0);
         params.set_entropy_thold(2.4);
         params.set_logprob_thold(-1.0);
         params.set_no_speech_thold(if super::labs::strict_silence_enabled() { 0.45 } else { 0.55 });
@@ -737,7 +751,11 @@ impl WhisperEngine {
         params.set_max_len(TIMED_SEGMENT_MAX_CHARS);
         params.set_split_on_word(true);
 
-        let mut state = ctx.create_state()?;
+        let mut state_slot = self.batch_state.lock().await;
+        if state_slot.is_none() {
+            *state_slot = Some(ctx.create_state()?);
+        }
+        let state = state_slot.as_mut().expect("state just created");
         state.full(params, audio_data)?;
         let mut out = Vec::new();
         for i in 0..state.full_n_segments()? {
@@ -1008,6 +1026,10 @@ impl WhisperEngine {
                     fs::remove_file(&model_info.path).await
                         .map_err(|e| anyhow!("Failed to delete file '{}': {}", model_info.path.display(), e))?;
                     log::info!("Successfully deleted available model file: {}", model_info.path.display());
+                    #[cfg(target_os = "macos")]
+                    if let (Some(dir), Some(name)) = (model_info.path.parent(), model_info.path.file_name()) {
+                        super::coreml_encoder::remove_unused(dir, &name.to_string_lossy());
+                    }
                 } else {
                     log::warn!("File '{}' does not exist, nothing to delete", model_info.path.display());
                 }

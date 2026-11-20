@@ -168,6 +168,11 @@ pub async fn operation_guard() -> tokio::sync::MutexGuard<'static, ()> {
         .await
 }
 
+/// A diarization operation (speaker identification, model install) is running.
+pub fn operation_busy() -> bool {
+    OPERATION_LOCK.get_or_init(|| tokio::sync::Mutex::new(())).try_lock().is_err()
+}
+
 pub fn try_operation_guard() -> Result<tokio::sync::MutexGuard<'static, ()>, String> {
     OPERATION_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
         .try_lock().map_err(|_| "Wait for speaker identification to finish before uninstalling".into())

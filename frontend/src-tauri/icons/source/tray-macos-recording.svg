@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="44" height="44" viewBox="0 0 44 44">
+  <!-- macOS menu-bar icon while recording. A template image cannot hold colour,
+       so this one is drawn in full colour: a solid red bubble with white bars
+       reads on both light and dark menu bars. -->
+  <g transform="translate(4 4) scale(1.5)">
+    <path d="M6.5 3.5h11a2.5 2.5 0 0 1 2.5 2.5v8a2.5 2.5 0 0 1-2.5 2.5H11.5L7 20.5v-4h-.5A2.5 2.5 0 0 1 4 14V6a2.5 2.5 0 0 1 2.5-2.5z" fill="#F2383F" stroke="#F2383F" stroke-width="1.2" stroke-linejoin="round"/>
+    <path d="M8.5 9v2M10.83 7.5v5M13.17 8.25v3.5M15.5 9.25v1.5" stroke="#FFFFFF" stroke-width="1.6" stroke-linecap="round" fill="none"/>
+  </g>
+</svg>

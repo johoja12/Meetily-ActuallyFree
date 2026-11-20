@@ -529,27 +529,36 @@ async fn run_retranscription<R: Runtime>(
             keep(t.text, t.start_ms, t.end_ms, t.rms, conf, t.speaker_hint);
         }
     } else {
+        // Packed windows give Parakeet context across short VAD segments;
+        // rows stay one per segment (see speech_windows::PARAKEET_WINDOW_SAMPLES).
         let engine = parakeet_engine.as_ref().unwrap();
-        processable_count = processable_segments.len();
-        info!("Processing {} segments (after splitting)", processable_count);
-        for (i, (segment, speaker_hint)) in processable_segments.iter().enumerate() {
-            if RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst) {
-                return Err(anyhow!("Retranscription cancelled"));
-            }
-            let segment_duration_sec = (segment.end_timestamp_ms - segment.start_timestamp_ms) / 1000.0;
-            emit_progress(
-                &app,
-                &meeting_id,
-                "transcribing",
-                25 + ((i as f32 / processable_count as f32) * 55.0) as u32,
-                &format!("Transcribing segment {} of {} ({:.1}s)...", i + 1, processable_count, segment_duration_sec),
-            );
-            let text = engine
-                .transcribe_audio(segment.samples.clone(), vocabulary.as_deref())
-                .await
-                .map_err(|e| anyhow!("Parakeet transcription failed on segment {}: {}", i, e))?;
-            let (rms, _) = super::speech_windows::signal_level(&segment.samples);
-            keep(text, segment.start_timestamp_ms, segment.end_timestamp_ms, rms, 0.9, *speaker_hint);
+        let mut windows = 0;
+        let texts = super::speech_windows::transcribe_packed_parakeet(
+            engine,
+            &processable_segments,
+            vocabulary.as_deref(),
+            |i, count, window| {
+                windows = count;
+                emit_progress(
+                    &app,
+                    &meeting_id,
+                    "transcribing",
+                    25 + ((i as f32 / count as f32) * 55.0) as u32,
+                    &format!(
+                        "Transcribing part {} of {} ({:.0}s)...",
+                        i + 1,
+                        count,
+                        (window.end_ms() - window.start_ms) / 1000.0
+                    ),
+                );
+                !RETRANSCRIPTION_CANCELLED.load(Ordering::SeqCst)
+            },
+        )
+        .await?
+        .ok_or_else(|| anyhow!("Retranscription cancelled"))?;
+        processable_count = windows;
+        for t in texts {
+            keep(t.text, t.start_ms, t.end_ms, t.rms, 0.9, t.speaker_hint);
         }
     }
 

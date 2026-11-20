@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- macOS app icon: Apple's grid puts the 824 px rounded square inside the
+       1024 canvas, with room for its shadow, so it sits level with other Dock icons. -->
+  <defs>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3D5CFF"/>
+      <stop offset="1" stop-color="#1D3BD9"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#000000" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#plate)" filter="url(#shadow)"/>
+  <g transform="translate(215.36 215.36) scale(24.72)">
+    <path d="M6.5 3.5h11a2.5 2.5 0 0 1 2.5 2.5v8a2.5 2.5 0 0 1-2.5 2.5H11.5L7 20.5v-4h-.5A2.5 2.5 0 0 1 4 14V6a2.5 2.5 0 0 1 2.5-2.5z" fill="#FFFFFF"/>
+    <path d="M8.5 9v2M10.83 7.5v5M13.17 8.25v3.5M15.5 9.25v1.5" stroke="#1D3BD9" stroke-width="1.6" stroke-linecap="round" fill="none"/>
+  </g>
+</svg>

@@ -326,32 +326,30 @@ impl AudioStream {
             let mut stream = core_stream;
 
             async move {
-                use futures_util::StreamExt;
-
                 let mut buffer = Vec::new();
-                let mut frame_count = 0;
                 let frames_per_chunk = 1024; // Process in chunks of 1024 samples
                 let mut terminal_error_reported = false;
                 let mut stalled = false;
 
                 info!("✅ Stream: Core Audio processing task started for {}", device_name);
 
-                let mut _sample_count = 0u64;
+                let mut chunk = Vec::with_capacity(frames_per_chunk);
                 loop {
-                    let sample = match tokio::time::timeout(
+                    chunk.clear();
+                    // One timer per wait, not per sample (issue #23).
+                    match tokio::time::timeout(
                         tokio::time::Duration::from_secs(5),
-                        stream.next(),
+                        std::future::poll_fn(|cx| stream.poll_chunk(cx, &mut chunk, frames_per_chunk)),
                     )
                     .await
                     {
-                        Ok(Some(sample)) => {
+                        Ok(true) => {
                             if stalled {
                                 info!("Core Audio callbacks resumed for {}", device_name);
                                 stalled = false;
                             }
-                            sample
                         }
-                        Ok(None) => break,
+                        Ok(false) => break,
                         Err(_) => {
                             if !state_for_stream.is_recording() {
                                 break;
@@ -369,7 +367,7 @@ impl AudioStream {
                             }
                             continue;
                         }
-                    };
+                    }
                     let current_sample_rate = stream.sample_rate();
                     if current_sample_rate != sample_rate {
                         error!(
@@ -380,19 +378,12 @@ impl AudioStream {
                         terminal_error_reported = true;
                         break;
                     }
-                    _sample_count += 1;
-                    // if _sample_count % 48000 == 0 {
-                    //     info!("📊 Stream: Received {} samples from Core Audio stream", _sample_count);
-                    // }
 
-                    buffer.push(sample);
-                    frame_count += 1;
-
-                    // Process when we have enough samples
-                    if frame_count >= frames_per_chunk {
-                        capture.process_audio_data(&buffer);
-                        buffer.clear();
-                        frame_count = 0;
+                    // The pipeline still receives exactly frames_per_chunk samples per call.
+                    buffer.extend_from_slice(&chunk);
+                    while buffer.len() >= frames_per_chunk {
+                        capture.process_audio_data(&buffer[..frames_per_chunk]);
+                        buffer.drain(..frames_per_chunk);
                     }
                 }
 

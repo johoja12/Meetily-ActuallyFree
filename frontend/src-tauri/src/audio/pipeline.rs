@@ -45,6 +45,11 @@ use super::recording_preferences;
 use super::recording_state::{AudioChunk, AudioError, DeviceType, RecordingState};
 use super::vad::{ContinuousVadProcessor, SpeechSegment};
 
+/// Level meter updates per source at most every 60 ms (~16 per second). Each
+/// update is a Tauri event to every window; 40 ms (25/s per source) cost the
+/// WebView more than the meters needed.
+const LEVEL_EMIT_INTERVAL_MS: u128 = 60;
+
 /// Per-source live audio level sample emitted to the frontend visualizer.
 /// One of these is sent per incoming (single-source) audio chunk, throttled
 /// to ~25 updates/sec per source so the meter animates smoothly without spam.
@@ -494,7 +499,7 @@ impl ProfessionalAudioMixer {
 /// signal by `output_delay()` frames, so those leading frames are dropped to
 /// keep mic and system tracks aligned. `drain` emits the partial block and the
 /// held-back frames at Stop: total output stays round(input frames × ratio).
-struct CaptureResampler {
+pub(crate) struct CaptureResampler {
     resampler: FftFixedIn<f32>,
     pending: Vec<f32>,
     chunk_size: usize,
@@ -506,7 +511,7 @@ struct CaptureResampler {
 }
 
 impl CaptureResampler {
-    fn new(input_rate: u32, output_rate: u32, chunk_size: usize) -> Result<Self, rubato::ResamplerConstructionError> {
+    pub(crate) fn new(input_rate: u32, output_rate: u32, chunk_size: usize) -> Result<Self, rubato::ResamplerConstructionError> {
         let resampler = FftFixedIn::<f32>::new(input_rate as usize, output_rate as usize, chunk_size, 1, 1)?;
         let delay_left = resampler.output_delay();
         Ok(Self {
@@ -522,7 +527,7 @@ impl CaptureResampler {
 
     /// Resample every complete block. Output of earlier blocks stays in `out`
     /// if a later block fails.
-    fn process(&mut self, samples: &[f32], out: &mut Vec<f32>) -> Result<(), rubato::ResampleError> {
+    pub(crate) fn process(&mut self, samples: &[f32], out: &mut Vec<f32>) -> Result<(), rubato::ResampleError> {
         self.pending.extend_from_slice(samples);
         self.input_frames += samples.len() as u64;
         while self.pending.len() >= self.chunk_size {
@@ -535,7 +540,7 @@ impl CaptureResampler {
 
     /// Flush the partial block and the held-back delay frames. Rubato pads
     /// both with zeros; only output that corresponds to real input is kept.
-    fn drain(&mut self, out: &mut Vec<f32>) -> Result<(), rubato::ResampleError> {
+    pub(crate) fn drain(&mut self, out: &mut Vec<f32>) -> Result<(), rubato::ResampleError> {
         if !self.pending.is_empty() {
             let partial = std::mem::take(&mut self.pending);
             let mut waves_out = self.resampler.process_partial(Some(&[partial]), None)?;
@@ -1106,6 +1111,17 @@ fn new_mic_normalizer(sample_rate: u32) -> Option<LoudnessNormalizer> {
 }
 
 impl AudioPipeline {
+    /// Benchmarks (`perf_bench`) receive the saved tracks and level updates.
+    #[cfg(test)]
+    pub(crate) fn set_bench_outputs(
+        &mut self,
+        tracks: mpsc::UnboundedSender<AudioChunk>,
+        levels: mpsc::UnboundedSender<AudioLevels>,
+    ) {
+        self.recording_sender_for_mixed = Some(tracks);
+        self.level_sender = Some(levels);
+    }
+
     pub fn new(
         receiver: mpsc::UnboundedReceiver<AudioChunk>,
         transcription_sender: mpsc::UnboundedSender<AudioChunk>,
@@ -1410,7 +1426,7 @@ impl AudioPipeline {
                         } else {
                             &mut self.last_sys_level_emit
                         };
-                        if !chunk.data.is_empty() && now.duration_since(*last).as_millis() >= 40 {
+                        if !chunk.data.is_empty() && now.duration_since(*last).as_millis() >= LEVEL_EMIT_INTERVAL_MS {
                             *last = now;
                             let n = chunk.data.len() as f32;
                             let rms = (chunk.data.iter().map(|&x| x * x).sum::<f32>() / n).sqrt();
@@ -1590,7 +1606,7 @@ impl AudioPipeline {
     fn emit_mic_level(&mut self, mic: &[f32]) {
         let Some(level_tx) = self.level_sender.as_ref() else { return };
         let now = std::time::Instant::now();
-        if !self.ring_buffer.mic_enabled || mic.is_empty() || now.duration_since(self.last_mic_level_emit).as_millis() < 40 {
+        if !self.ring_buffer.mic_enabled || mic.is_empty() || now.duration_since(self.last_mic_level_emit).as_millis() < LEVEL_EMIT_INTERVAL_MS {
             return;
         }
         self.last_mic_level_emit = now;

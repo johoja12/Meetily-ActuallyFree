@@ -63,6 +63,7 @@ pub mod openai;
 pub mod openrouter;
 mod optional_models;
 pub mod parakeet_engine;
+mod perf_bench;
 pub mod paths;
 pub mod state;
 pub mod summary;
@@ -634,6 +635,9 @@ pub fn run() {
             diarization::prepare_nemotron_coreml_in_background();
             #[cfg(target_os = "macos")]
             parakeet_engine::coreml::prepare_in_background();
+            audio::room_cleanup::start(_app.handle().clone());
+            #[cfg(target_os = "macos")]
+            whisper_engine::coreml_encoder::prepare_in_background();
 
             Ok(())
         })

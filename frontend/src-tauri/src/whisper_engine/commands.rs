@@ -847,6 +847,9 @@ pub async fn whisper_download_model(
                     }
                     let _ = app_handle.emit("post-call-transcript-config-changed", ());
                 }
+                // The Neural Engine encoder for the new model, if one is published.
+                #[cfg(target_os = "macos")]
+                crate::whisper_engine::coreml_encoder::prepare_in_background();
                 // Emit completion event
                 if let Err(e) = app_handle.emit(
                     "model-download-complete",

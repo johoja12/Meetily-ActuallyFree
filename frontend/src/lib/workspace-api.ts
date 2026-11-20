@@ -239,6 +239,8 @@ export const saveMeetingNotes = (meetingId: string, markdown: string | null, jso
 
 export interface MeetingAudio {
   path: string | null;
+  /** Dereverberated copy of a room-microphone recording, once written. */
+  cleanedPath?: string | null;
   micPath: string | null;
   systemPath: string | null;
 }

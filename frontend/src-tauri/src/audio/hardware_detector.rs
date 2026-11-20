@@ -105,16 +105,24 @@ impl HardwareProfile {
         (false, GpuType::None)
     }
 
-    /// Detect available system memory in GB
+    /// Installed memory in GiB, rounded (a 16 GB Mac reports 16). `MEMORY_GB`
+    /// overrides it for tests. This used to return 8 unless `MEMORY_GB` was
+    /// set, so no machine ever reached the top tier (issue #22).
     fn detect_memory_gb() -> u8 {
-        // Simple memory detection - could be enhanced with system-specific calls
-        match std::env::var("MEMORY_GB") {
-            Ok(mem_str) => mem_str.parse().unwrap_or(8),
-            Err(_) => {
-                // Default estimates based on common configurations
-                8 // Conservative default
-            }
+        if let Some(gb) = std::env::var("MEMORY_GB").ok().and_then(|v| v.parse().ok()) {
+            return gb;
         }
+        let mut system = sysinfo::System::new();
+        system.refresh_memory();
+        Self::memory_gb_from_bytes(system.total_memory())
+    }
+
+    /// 8 when the OS reports nothing, the old conservative default.
+    fn memory_gb_from_bytes(bytes: u64) -> u8 {
+        if bytes == 0 {
+            return 8;
+        }
+        ((bytes as f64) / (1u64 << 30) as f64).round().clamp(1.0, 255.0) as u8
     }
 
     /// Calculate performance tier based on hardware
@@ -276,6 +284,14 @@ impl HardwareProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_is_reported_in_rounded_gib() {
+        assert_eq!(HardwareProfile::memory_gb_from_bytes(16 * (1 << 30)), 16);
+        assert_eq!(HardwareProfile::memory_gb_from_bytes(17_179_000_000), 16);
+        assert_eq!(HardwareProfile::memory_gb_from_bytes(0), 8);
+        assert_eq!(HardwareProfile::memory_gb_from_bytes(u64::MAX), 255);
+    }
 
     #[test]
     fn test_hardware_detection() {
