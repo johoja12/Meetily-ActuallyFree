@@ -155,6 +155,19 @@ fn install_capture_warning_callback<R: Runtime>(
     });
 }
 
+/// Emit only after startup succeeds, once the actual stream is owned by the manager.
+fn warn_microphone_mismatch<R: Runtime>(app: &AppHandle<R>, requested: Option<&str>, actual: &str) {
+    if let Some(message) = super::microphone_warning::mismatch_message(requested, actual) {
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.emit("recording-audio-route-warning", serde_json::json!({
+                "title": "Recording with a different microphone",
+                "message": message,
+                "persistent": true,
+            }));
+        }
+    }
+}
+
 fn map_recording_start_error<R: Runtime>(app: &AppHandle<R>, error: anyhow::Error) -> String {
     crate::tray::update_tray_menu(app);
     if error.downcast_ref::<crate::onnx_runtime::InitializationError>().is_some() {
@@ -319,6 +332,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     // ============================================================================
     // MICROPHONE DEVICE RESOLUTION: Preference â†’ Default â†’ Error
     // ============================================================================
+    let requested_microphone = preferred_mic_name.clone();
     let microphone_device = match preferred_mic_name {
         Some(pref_name) => {
             info!("ðŸŽ¤ Attempting to use preferred microphone: '{}'", pref_name);
@@ -480,6 +494,7 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     // Start recording with resolved devices (replaces start_recording_with_defaults_and_auto_save call)
     #[cfg(target_os = "windows")]
     let resolved_system_device_name = system_device.as_ref().map(|device| device.name.clone());
+    let actual_microphone = microphone_device.as_ref().map(|d| d.name.clone()).unwrap_or_default();
     let transcription_receiver = manager
         .start_recording(microphone_device, system_device, auto_save, Some(level_sender))
         .await
@@ -575,11 +590,13 @@ pub async fn start_recording_with_meeting_name<R: Runtime>(
     // Emit success event
     if let Err(error) = app.emit("recording-started", serde_json::json!({
         "message": "Recording started successfully with parallel processing",
-        "devices": ["Default Microphone", "Default System Audio"],
+        "devices": [actual_microphone.clone(), "Default System Audio".to_string()],
         "workers": 3
     })) {
         warn!("Recording started, but the recording-started event failed: {}", error);
     }
+
+    warn_microphone_mismatch(&app, requested_microphone.as_deref(), &actual_microphone);
 
     // Update tray menu to reflect recording state
     crate::tray::update_tray_menu(&app);
@@ -761,6 +778,7 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     // Start recording with specified devices and auto_save setting
     #[cfg(target_os = "windows")]
     let resolved_system_device_name = system_device.as_ref().map(|device| device.name.clone());
+    let actual_microphone = mic_device.as_ref().map(|d| d.name.clone()).unwrap_or_default();
     let transcription_receiver = manager
         .start_recording(mic_device, system_device, auto_save, Some(level_sender))
         .await
@@ -855,13 +873,15 @@ pub async fn start_recording_with_devices_and_meeting<R: Runtime>(
     if let Err(error) = app.emit("recording-started", serde_json::json!({
         "message": "Recording started with custom devices and parallel processing",
         "devices": [
-            mic_device_name.unwrap_or_else(|| "Default Microphone".to_string()),
+            actual_microphone.clone(),
             system_device_name.unwrap_or_else(|| "Default System Audio".to_string())
         ],
         "workers": 3
     })) {
         warn!("Recording started, but the recording-started event failed: {}", error);
     }
+
+    warn_microphone_mismatch(&app, mic_device_name.as_deref(), &actual_microphone);
 
     // Update tray menu to reflect recording state
     crate::tray::update_tray_menu(&app);

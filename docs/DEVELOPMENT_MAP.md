@@ -22,6 +22,9 @@ and a model's anonymous speaker channels are also different concepts.
 persisted session mode, microphone diarization, and post-call provenance rules.
 In that opt-in mode the microphone is multi-speaker audio, so it does not
 establish `You`; computer/per-app capture is excluded for the session.
+Both native startup paths now warn visibly when the selected microphone is
+unavailable and a different input is used; the linked room note documents the
+event interface, focused tests, and remaining qualification limits.
 
 Speech-start pre-roll, live system speech sensitivity, and real-call replay
 qualification are documented in [LIVE_SPEECH_RETENTION.md](LIVE_SPEECH_RETENTION.md).

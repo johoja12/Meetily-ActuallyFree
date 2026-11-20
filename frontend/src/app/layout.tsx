@@ -285,12 +285,12 @@ export default function RootLayout({
 
   useEffect(() => {
     if (!startupResolved || startupError || pendingCrashReport) return
-    const unlisten = listen<{ title: string; message: string }>(
+    const unlisten = listen<{ title: string; message: string; persistent?: boolean }>(
       'recording-audio-route-warning',
       (event) => {
         toast.warning(event.payload.title, {
           description: event.payload.message,
-          duration: 30000,
+          duration: event.payload.persistent ? Infinity : 30000,
         });
         invoke('show_simple_notification', {
           title: event.payload.title,

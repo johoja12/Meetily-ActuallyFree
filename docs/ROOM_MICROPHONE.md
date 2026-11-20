@@ -103,3 +103,28 @@ room-mode recording produced live transcript text labeled Speaker 1. This is a
 live acoustic capture/ASR/labeling observation, not multi-speaker accuracy or native
 Desk Pro USB mix qualification. The recording and transcript remain private and
 were not copied into this repository.
+
+## Unavailable selected microphone warning
+
+Both native recording-start commands compare the requested microphone with the
+resolved capture input using `audio/microphone_warning.rs`. After successful
+startup, a mismatch emits `recording-audio-route-warning` to the main window,
+naming the requested and actual microphones. The shared layout shows a warning
+that stays until dismissed and requests the existing desktop notification.
+`recording-started.devices[0]` now reports the resolved microphone rather than
+the unavailable requested name. No saved preference is overwritten.
+
+Reconnecting the preferred microphone does not automatically move an existing
+capture stream. The warning tells the user to select it in recording controls or
+start a new recording. Default-input selection without an explicit preferred
+microphone is not considered a mismatch. This change does not add automatic
+switching or continuous preferred-device polling. Existing device-disconnection
+handling is unchanged; the new warning covers startup fallback in both entrypoints.
+
+Standalone native warning-policy tests cover missing preferred hardware,
+matching input names, and default selection (two tests passed). Frontend TypeScript
+checking and native `cargo check --lib --offline` passed. The native check used
+`TAURI_CONFIG='{"bundle":{"externalBin":[]}}'` to omit installer-sidecar bundling;
+it does not verify packaging.
+Physical unplug/reconnect warning delivery must be qualified separately; unit
+tests do not establish installed behavior.
